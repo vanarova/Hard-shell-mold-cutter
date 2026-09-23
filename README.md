@@ -1,97 +1,100 @@
-# Mold Liner — STL Viewer
+# Hard-shell Mold Cutter
 
-Desktop application for viewing STL files and slicing them into multiple pieces.
+Desktop tools for STL viewing and hard-shell mold workflows: layered slicing, 2.5D mold making, and 3D plane wrapping with a deformable end plane.
 
-## Features
+## Tools
 
-- **View STL files** — interactive 3D viewport with orbit, pan, and zoom
-- **Triangle reduction** — decimate a model before slicing and save as `name_reduced.stl`
-- **Z-axis slicing** — split a model into horizontal layers by height (mm)
-- **Equidistant boundaries** — per-slice offset wall using current slice XY and previous-layer Z stack
-- **Mold negative** — subtract the stitched boundary from an oversized block to produce a cavity STL
-- **Organized output** — slices are saved as `1.stl`, `2.stl`, … in a folder named after the STL file; boundaries go in a `boundaries_v2` subfolder
+| Launcher | Entry point | Purpose |
+| --- | --- | --- |
+| `Launch_3D_Mold_Wrapper.bat` | `src/main_3d_mold_wrapper.py` | Start/end oriented planes, end-plane deform, Backend / Back-start planes, Wrap Plane and Wrap Back |
+| `launch_25D-MoldMaker.bat` | `src/main_25d_moldmaker.py` | 2.5D mold maker workflow |
+| `launch.bat` | `src/main.py` | Classic STL viewer and Z-slice / boundary / mold-negative pipeline |
+
+On first run, each launcher creates a local `.venv` (if missing) and installs dependencies from `requirements.txt`.
 
 ## Requirements
 
 - Python 3.10+
-- Windows, macOS, or Linux
+- Windows (launchers are `.bat`; source also runs on macOS/Linux with a venv)
 
-## Setup
+## Setup (manual)
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate        # Windows
+.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
 ## Run
 
+**3D Mold Wrapper (recommended for plane wrap workflows):**
+
+```bat
+Launch_3D_Mold_Wrapper.bat
+```
+
+or:
+
 ```bash
-python src/main.py
+.venv\Scripts\python.exe src\main_3d_mold_wrapper.py
 ```
 
-## Usage
+**2.5D Mold Maker:**
 
-1. Click **Open STL…** and select a `.stl` file.
-2. Inspect the model in the 3D viewer (drag to rotate, scroll to zoom).
-3. Optional: under **Prepare for Slicing**, set how much to reduce triangles (%) and click **Reduce & Save**. This writes `my_part_reduced.stl` next to the original and loads it for slicing.
-4. Enter the slice height in millimeters (default 10 mm).
-5. Click **Slice into Pieces**.
-
-Sliced files are written next to the original STL:
-
-```
-my_part.stl
-my_part/
-  1.stl
-  2.stl
-  3.stl
-  ...
+```bat
+launch_25D-MoldMaker.bat
 ```
 
-The final slice may be shorter than the requested height if the model height is not an exact multiple.
+**Classic Mold Liner:**
 
-### Boundaries
-
-1. Slice the model first.
-2. Enter the **Offset distance (mm)** and ensure **Height per slice (mm)** matches your slice settings.
-3. Click **Create Boundaries**.
-
-Each boundary is a thin wall (0.1 mm) offset in XY from the current slice footprint. Z placement uses the topmost point from the previous *x* slice layers, where *x* = boundary offset ÷ slice height.
-
-Boundary files are saved as:
-
-```
-my_part/
-  1.stl
-  2.stl
-  boundaries_v2/
-    1.stl
-    2.stl
-    ...
+```bat
+launch.bat
 ```
 
-### Stitch boundaries
+## 3D Mold Wrapper
 
-1. Create slices and boundaries first.
-2. Click **Stitch Boundaries**.
+1. Open an STL and optionally reduce triangles.
+2. Set **Start Plane** and **End Plane** (X/Y/Z, rotate X/Y/Z, pick on model, confirm).
+3. Use **Match End to Start** inside the End Plane section when needed.
+4. Deform the end plane with control points (select from the list or click a point in the 3D view, then pull/push).
+5. **Copy Backend Plane** freezes the curved end surface; optionally show/hide it.
+6. Set **Back-start Plane** (or **Apply Backend Position to Back-start**) and its N×N sample density (up to ~100,000 points; points are not drawn).
+7. **Wrap Plane** extrudes Start → End (stops on model or deformed end).
+8. **Wrap Back** extrudes Back-start → Backend (stops on model or Backend surface).
 
-The tool reads `boundaries_v2/1.stl`, `2.stl`, … in order and lofts them into one unified watertight shell with shared rings at each layer interface.
+Outputs are written next to the model STL in a folder named after the file (for example `wrap_plane.stl`, `wrap_back_plane.stl`).
 
-Output file:
+## Classic Mold Liner (brief)
+
+1. Open STL → optional triangle reduction.
+2. Slice by Z height into `1.stl`, `2.stl`, …
+3. Create equidistant boundaries → `boundaries_v2/`.
+4. Stitch boundaries → `stitched.stl`.
+5. Create mold negative → `negative.stl`.
+
+See `spec/MOLD_LINER_ALGORITHM_SPEC.md` for algorithm details.
+
+## Project layout
 
 ```
-my_part/boundaries_v2/stitched.stl
+├── Launch_3D_Mold_Wrapper.bat
+├── launch_25D-MoldMaker.bat
+├── launch.bat
+├── requirements.txt
+├── README.md
+├── spec/
+│   └── MOLD_LINER_ALGORITHM_SPEC.md
+└── src/
+    ├── main_3d_mold_wrapper.py
+    ├── main_25d_moldmaker.py
+    ├── main.py
+    └── app/
+        ├── mold_wrapper_main_window.py
+        ├── plane_deform.py
+        ├── plane_wrap.py
+        └── …
 ```
 
-### Mold negative
+## License / remote
 
-1. Stitch boundaries first.
-2. Set **Block extra size x (mm)** — the box will be x mm longer, wider, and taller than the stitched model.
-3. Click **Create Mold Negative**.
-
-The tool builds an axis-aligned box around the stitched model, subtracts the stitch, and saves the cavity:
-
-```
-my_part/boundaries_v2/negative.stl
-```
+Repository: https://github.com/vanarova/Hard-shell-mold-cutter
