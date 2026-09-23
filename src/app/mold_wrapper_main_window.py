@@ -31,7 +31,6 @@ from PyQt6.QtWidgets import (
 
 from app.footer_bar import FooterBar
 from app.main_window import create_app
-from app.mesh_reducer import reduce_mesh
 from app.plane_deform import (
     DEFAULT_CONTROL_POINTS,
     MAX_CONTROL_POINTS,
@@ -176,9 +175,7 @@ class PlanePanel:
     slider_ry: QSlider | None = None
     lbl_rz: QLabel | None = None
     slider_rz: QSlider | None = None
-    btn_pick: QPushButton | None = None
     btn_confirm: QPushButton | None = None
-    btn_clear: QPushButton | None = None
 
     def slider_for(self, axis: AxisName) -> QSlider | None:
         return getattr(self, f"slider_{axis}")
@@ -197,7 +194,6 @@ class MoldWrapperMainWindow(QMainWindow):
         super().__init__()
         self._current_path: Path | None = None
         self._slider_sync = False
-        self._active_pick_panel: PlanePanel | None = None
         self._wrap_mesh = None
         self._wrap_back_mesh = None
         self._copied_end_mesh = None
@@ -301,25 +297,6 @@ class MoldWrapperMainWindow(QMainWindow):
         self.lbl_file.setWordWrap(True)
         self.lbl_file.setObjectName("fileLabel")
         file_layout.addWidget(self.lbl_file)
-
-        reduce_row = QHBoxLayout()
-        reduce_label = QLabel("Reduce triangles by")
-        reduce_label.setWordWrap(True)
-        reduce_row.addWidget(reduce_label, stretch=1)
-        self.spin_reduce_percent = QDoubleSpinBox()
-        self.spin_reduce_percent.setRange(1.0, 95.0)
-        self.spin_reduce_percent.setDecimals(0)
-        self.spin_reduce_percent.setSingleStep(5.0)
-        self.spin_reduce_percent.setValue(50.0)
-        self.spin_reduce_percent.setSuffix(" %")
-        self.spin_reduce_percent.setMinimumWidth(88)
-        reduce_row.addWidget(self.spin_reduce_percent)
-        file_layout.addLayout(reduce_row)
-
-        self.btn_reduce_triangles = QPushButton("Reduce Triangles")
-        self.btn_reduce_triangles.setEnabled(False)
-        self.btn_reduce_triangles.clicked.connect(self._reduce_triangles)
-        file_layout.addWidget(self.btn_reduce_triangles)
 
         layout.addWidget(file_group)
 
@@ -551,23 +528,10 @@ class MoldWrapperMainWindow(QMainWindow):
         )
         layout.addWidget(plane.slider_rz)
 
-        plane.btn_pick = QPushButton("Pick on Model")
-        plane.btn_pick.setCheckable(True)
-        plane.btn_pick.setEnabled(False)
-        plane.btn_pick.toggled.connect(
-            lambda checked, p=plane: self._toggle_pick_on_model(p, checked)
-        )
-        layout.addWidget(plane.btn_pick)
-
         plane.btn_confirm = QPushButton(f"Confirm {plane.title}")
         plane.btn_confirm.setEnabled(False)
         plane.btn_confirm.clicked.connect(lambda _=False, p=plane: self._confirm_plane(p))
         layout.addWidget(plane.btn_confirm)
-
-        plane.btn_clear = QPushButton(f"Clear {plane.title}")
-        plane.btn_clear.setEnabled(False)
-        plane.btn_clear.clicked.connect(lambda _=False, p=plane: self._clear_plane(p))
-        layout.addWidget(plane.btn_clear)
 
         if plane is self._back_start:
             self._append_back_start_points_controls(layout)
@@ -710,8 +674,6 @@ class MoldWrapperMainWindow(QMainWindow):
     def _set_controls_enabled(self, enabled: bool) -> None:
         self.btn_open.setEnabled(enabled)
         has_mesh = self.viewer.mesh is not None
-        self.spin_reduce_percent.setEnabled(enabled and has_mesh)
-        self.btn_reduce_triangles.setEnabled(enabled and has_mesh)
         self.btn_match_end_to_start.setEnabled(enabled and has_mesh)
         self.spin_point_density.setEnabled(enabled and has_mesh)
         self.btn_wrap_plane.setEnabled(enabled and has_mesh and self._planes_ready())
@@ -752,15 +714,11 @@ class MoldWrapperMainWindow(QMainWindow):
         assert plane.slider_rx is not None
         assert plane.slider_ry is not None
         assert plane.slider_rz is not None
-        assert plane.btn_pick is not None
         assert plane.btn_confirm is not None
-        assert plane.btn_clear is not None
         plane.slider_rx.setEnabled(enabled)
         plane.slider_ry.setEnabled(enabled)
         plane.slider_rz.setEnabled(enabled)
-        plane.btn_pick.setEnabled(enabled)
         plane.btn_confirm.setEnabled(enabled)
-        plane.btn_clear.setEnabled(enabled and plane.confirmed.is_complete)
 
     def _update_size_label(self, mesh=None) -> None:
         if mesh is None:
@@ -830,56 +788,8 @@ class MoldWrapperMainWindow(QMainWindow):
             f"Loaded {path.name} — {mesh.n_cells:,} triangles"
         )
 
-    def _reduce_triangles(self) -> None:
-        mesh = self.viewer.mesh
-        if mesh is None:
-            return
-
-        reduction_percent = self.spin_reduce_percent.value()
-        original_triangles = int(mesh.n_cells)
-        progress = self._progress_callback()
-
-        def run_reduce():
-            progress("Decimating mesh surface", 0, 2)
-            reduced = reduce_mesh(mesh, reduction_percent)
-            progress("Reduction complete", 2, 2)
-            return reduced
-
-        try:
-            reduced = self._run_busy("Reducing triangles…", run_reduce)
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Reduce Error", f"Could not reduce mesh:\n{exc}")
-            return
-
-        reduced_triangles = int(reduced.n_cells)
-        actual_percent = 100.0 * (1.0 - reduced_triangles / original_triangles)
-
-        self.viewer.set_mesh(reduced)
-        self.viewer.set_view_mode(self.footer.current_view_mode())
-        self._refresh_plane_overlays()
-
-        QMessageBox.information(
-            self,
-            "Triangles Reduced",
-            f"Reduced from {original_triangles:,} to {reduced_triangles:,} triangles "
-            f"({actual_percent:.0f}% reduction).",
-        )
-        self.footer.show_message(
-            f"Mesh reduced — {original_triangles:,} → {reduced_triangles:,} triangles"
-        )
-
-    def _stop_picking(self) -> None:
-        self._active_pick_panel = None
-        self.viewer.set_point_pick_callback(None)
-        for plane in (self._start, self._end, self._back_start):
-            if plane.btn_pick is not None and plane.btn_pick.isChecked():
-                plane.btn_pick.blockSignals(True)
-                plane.btn_pick.setChecked(False)
-                plane.btn_pick.blockSignals(False)
-        self._sync_end_ctrl_click_picking()
-
     def _reset_all_planes(self) -> None:
-        self._stop_picking()
+        self.viewer.set_point_pick_callback(None)
         self.viewer.clear_overlays()
         for plane in (self._start, self._end, self._back_start):
             plane.confirmed.clear_confirmed()
@@ -1366,10 +1276,9 @@ class MoldWrapperMainWindow(QMainWindow):
         self._sync_end_ctrl_click_picking()
 
     def _sync_end_ctrl_click_picking(self) -> None:
-        """Enable click-to-select for end control points when not picking a plane."""
+        """Enable click-to-select for end control points."""
         can_pick = (
-            self._active_pick_panel is None
-            and self._end_pose_for_deform() is not None
+            self._end_pose_for_deform() is not None
             and self._end_ctrl_world_points is not None
             and len(self._end_ctrl_world_points) > 0
         )
@@ -1512,50 +1421,6 @@ class MoldWrapperMainWindow(QMainWindow):
             f"(X = {pose.x:.3f}, Y = {pose.y:.3f}, Z = {pose.z:.3f} mm)"
         )
 
-    def _toggle_pick_on_model(self, plane: PlanePanel, enabled: bool) -> None:
-        if enabled:
-            for other in (self._start, self._end, self._back_start):
-                if other is plane or other.btn_pick is None:
-                    continue
-                if other.btn_pick.isChecked():
-                    other.btn_pick.blockSignals(True)
-                    other.btn_pick.setChecked(False)
-                    other.btn_pick.blockSignals(False)
-            self._active_pick_panel = plane
-            self.viewer.set_display_click_callback(None)
-            self.viewer.set_point_pick_callback(self._on_model_point_picked)
-            self.footer.show_message(
-                f"Click the model to set {plane.title.lower()} X / Y / Z"
-            )
-            return
-
-        if self._active_pick_panel is plane:
-            self._active_pick_panel = None
-            self.viewer.set_point_pick_callback(None)
-            self._sync_end_ctrl_click_picking()
-            self.footer.show_message("Model picking disabled")
-        self._set_controls_enabled(True)
-
-    def _on_model_point_picked(self, point: tuple[float, float, float]) -> None:
-        plane = self._active_pick_panel
-        if plane is None:
-            return
-        x, y, z = point
-        self._slider_sync = True
-        for axis, value in (("x", x), ("y", y), ("z", z)):
-            spin = plane.spin_for(axis)  # type: ignore[arg-type]
-            assert spin is not None
-            spin.setValue(value)
-            self._set_slider_from_axis(plane, axis, value)  # type: ignore[arg-type]
-            plane.preview.set_axis(axis, value)  # type: ignore[arg-type]
-        self._slider_sync = False
-        self._update_plane_position_labels(plane)
-        self._refresh_plane_overlays()
-        self.footer.show_message(
-            f"{plane.title} set from click: "
-            f"X = {x:.3f}, Y = {y:.3f}, Z = {z:.3f} mm"
-        )
-
     def _confirm_plane(self, plane: PlanePanel) -> None:
         if not plane.preview.is_complete:
             return
@@ -1584,47 +1449,6 @@ class MoldWrapperMainWindow(QMainWindow):
             f"Rz = {plane.confirmed.rz:.0f}°"
         )
 
-    def _clear_plane(self, plane: PlanePanel) -> None:
-        if not plane.confirmed.is_complete:
-            return
-
-        plane.confirmed.clear_confirmed()
-        mesh = self.viewer.mesh
-        if mesh is not None:
-            z_min, z_max = mesh_z_bounds(mesh)
-            cx, cy = mesh_center_xy(mesh)
-            if plane is self._start:
-                z_frac = 0.25
-            elif plane is self._end:
-                z_frac = 0.75
-            else:
-                z_frac = 0.5
-            z = z_min + (z_max - z_min) * z_frac
-            self._slider_sync = True
-            for axis, value in (("x", cx), ("y", cy), ("z", z)):
-                spin = plane.spin_for(axis)  # type: ignore[arg-type]
-                assert spin is not None
-                spin.setValue(value)
-                self._set_slider_from_axis(plane, axis, value)  # type: ignore[arg-type]
-            assert plane.slider_rx is not None
-            assert plane.slider_ry is not None
-            assert plane.slider_rz is not None
-            plane.slider_rx.setValue(0)
-            plane.slider_ry.setValue(0)
-            plane.slider_rz.setValue(0)
-            self._slider_sync = False
-            plane.preview.reset_preview(cx, cy, z)
-
-        if plane is self._end:
-            self._reset_end_deform()
-
-        self._update_plane_status_label(plane)
-        self._update_plane_position_labels(plane)
-        self._update_plane_rotation_labels(plane)
-        self._refresh_plane_overlays()
-        self._set_controls_enabled(True)
-        self.footer.show_message(f"Cleared {plane.title.lower()}")
-
     def _wrap_plane(self) -> None:
         if self._current_path is None or self.viewer.mesh is None:
             return
@@ -1642,7 +1466,7 @@ class MoldWrapperMainWindow(QMainWindow):
         assert start.is_complete and end.is_complete
 
         # Prefer wrapping against the originally loaded model path when available;
-        # fall back to the current viewer mesh (e.g. after triangle reduction).
+        # fall back to the current viewer mesh.
         model_mesh = self.viewer.mesh
         output_dir = output_dir_for_stl(self._current_path)
         progress = self._progress_callback()

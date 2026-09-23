@@ -46,7 +46,6 @@ from app.curved_surface_text import (
 )
 from app.footer_bar import FooterBar
 from app.main_window import create_app
-from app.mesh_reducer import reduce_mesh
 from app.mesh_slicer import slice_single_at_z
 from app.slice_axis import output_dir_for_stl
 from app.stl_viewer import OVERLAY_COLOR, OverlayMesh, StlViewer, load_stl_polydata
@@ -69,7 +68,6 @@ class MoldMakerMainWindow(QMainWindow):
         self._current_path: Path | None = None
         self._preview_z: float | None = None
         self._plane_z: float | None = None
-        self._pick_on_model_active = False
         self._text_preview_mesh = None
         self._slider_sync = False
 
@@ -150,32 +148,13 @@ class MoldMakerMainWindow(QMainWindow):
         self.lbl_file.setObjectName("fileLabel")
         file_layout.addWidget(self.lbl_file)
 
-        reduce_row = QHBoxLayout()
-        reduce_label = QLabel("Reduce triangles by")
-        reduce_label.setWordWrap(True)
-        reduce_row.addWidget(reduce_label, stretch=1)
-        self.spin_reduce_percent = QDoubleSpinBox()
-        self.spin_reduce_percent.setRange(1.0, 95.0)
-        self.spin_reduce_percent.setDecimals(0)
-        self.spin_reduce_percent.setSingleStep(5.0)
-        self.spin_reduce_percent.setValue(50.0)
-        self.spin_reduce_percent.setSuffix(" %")
-        self.spin_reduce_percent.setMinimumWidth(88)
-        reduce_row.addWidget(self.spin_reduce_percent)
-        file_layout.addLayout(reduce_row)
-
-        self.btn_reduce_triangles = QPushButton("Reduce Triangles")
-        self.btn_reduce_triangles.setEnabled(False)
-        self.btn_reduce_triangles.clicked.connect(self._reduce_triangles)
-        file_layout.addWidget(self.btn_reduce_triangles)
-
         layout.addWidget(file_group)
 
         plane_group = QGroupBox("Slice Plane (Z axis)")
         plane_layout = QVBoxLayout(plane_group)
 
         plane_info = QLabel(
-            "Mark one XY plane along Z. Slide or pick on the model, then confirm."
+            "Mark one XY plane along Z. Slide to position, then confirm."
         )
         plane_info.setWordWrap(True)
         plane_info.setObjectName("fileLabel")
@@ -210,21 +189,10 @@ class MoldMakerMainWindow(QMainWindow):
         z_row.addWidget(self.spin_plane_z)
         plane_layout.addLayout(z_row)
 
-        self.btn_pick_plane = QPushButton("Pick on Model")
-        self.btn_pick_plane.setCheckable(True)
-        self.btn_pick_plane.setEnabled(False)
-        self.btn_pick_plane.toggled.connect(self._toggle_pick_on_model)
-        plane_layout.addWidget(self.btn_pick_plane)
-
         self.btn_confirm_plane = QPushButton("Confirm Plane")
         self.btn_confirm_plane.setEnabled(False)
         self.btn_confirm_plane.clicked.connect(self._confirm_plane)
         plane_layout.addWidget(self.btn_confirm_plane)
-
-        self.btn_clear_plane = QPushButton("Clear Plane")
-        self.btn_clear_plane.setEnabled(False)
-        self.btn_clear_plane.clicked.connect(self._clear_plane)
-        plane_layout.addWidget(self.btn_clear_plane)
 
         layout.addWidget(plane_group)
 
@@ -455,8 +423,6 @@ class MoldMakerMainWindow(QMainWindow):
     def _set_controls_enabled(self, enabled: bool) -> None:
         self.btn_open.setEnabled(enabled)
         has_mesh = self.viewer.mesh is not None
-        self.spin_reduce_percent.setEnabled(enabled and has_mesh)
-        self.btn_reduce_triangles.setEnabled(enabled and has_mesh)
         plane_ready = self._plane_ready()
         self.spin_slice_height.setEnabled(enabled and plane_ready)
         self.btn_slice.setEnabled(enabled and has_mesh and plane_ready)
@@ -481,9 +447,7 @@ class MoldMakerMainWindow(QMainWindow):
         plane_enabled = enabled and has_mesh
         self.slider_plane_z.setEnabled(plane_enabled)
         self.spin_plane_z.setEnabled(plane_enabled)
-        self.btn_pick_plane.setEnabled(plane_enabled)
         self.btn_confirm_plane.setEnabled(plane_enabled)
-        self.btn_clear_plane.setEnabled(plane_enabled and self._plane_z is not None)
 
     def _update_size_label(self, mesh=None) -> None:
         """Show Width × Length × Height (X × Y × Z) for the loaded mesh."""
@@ -575,49 +539,9 @@ class MoldMakerMainWindow(QMainWindow):
             f"Loaded {path.name} — {mesh.n_cells:,} triangles"
         )
 
-    def _reduce_triangles(self) -> None:
-        mesh = self.viewer.mesh
-        if mesh is None:
-            return
-
-        reduction_percent = self.spin_reduce_percent.value()
-        original_triangles = int(mesh.n_cells)
-        progress = self._progress_callback()
-
-        def run_reduce():
-            progress("Decimating mesh surface", 0, 2)
-            reduced = reduce_mesh(mesh, reduction_percent)
-            progress("Reduction complete", 2, 2)
-            return reduced
-
-        try:
-            reduced = self._run_busy("Reducing triangles…", run_reduce)
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Reduce Error", f"Could not reduce mesh:\n{exc}")
-            return
-
-        reduced_triangles = int(reduced.n_cells)
-        actual_percent = 100.0 * (1.0 - reduced_triangles / original_triangles)
-
-        self.viewer.set_mesh(reduced)
-        self.viewer.set_view_mode(self.footer.current_view_mode())
-        self._refresh_plane_overlays()
-
-        QMessageBox.information(
-            self,
-            "Triangles Reduced",
-            f"Reduced from {original_triangles:,} to {reduced_triangles:,} triangles "
-            f"({actual_percent:.0f}% reduction).",
-        )
-        self.footer.show_message(
-            f"Mesh reduced — {original_triangles:,} → {reduced_triangles:,} triangles"
-        )
-
     def _reset_plane(self) -> None:
         self._plane_z = None
         self._preview_z = None
-        self._pick_on_model_active = False
-        self.btn_pick_plane.setChecked(False)
         self.viewer.set_point_pick_callback(None)
         self.viewer.clear_overlays()
         self._update_plane_status_label()
@@ -798,29 +722,6 @@ class MoldMakerMainWindow(QMainWindow):
 
         self._refresh_plane_overlays()
 
-    def _toggle_pick_on_model(self, enabled: bool) -> None:
-        self._pick_on_model_active = enabled
-        if enabled:
-            self.viewer.set_point_pick_callback(self._on_model_point_picked)
-            self.footer.show_message("Click directly on the model surface to set slice plane Z")
-            return
-
-        if not self._pick_on_model_active:
-            self.viewer.set_point_pick_callback(None)
-        self.footer.show_message("Model picking disabled")
-        self._set_controls_enabled(True)
-
-    def _on_model_point_picked(self, point: tuple[float, float, float]) -> None:
-        _, _, z = point
-        self._slider_sync = True
-        self.spin_plane_z.setValue(z)
-        self._set_slider_from_z(z)
-        self._slider_sync = False
-        self._preview_z = z
-        self._update_plane_z_label()
-        self._refresh_plane_overlays()
-        self.footer.show_message(f"Plane Z set from click: {z:.3f} mm")
-
     def _confirm_plane(self) -> None:
         if self._preview_z is None:
             return
@@ -836,27 +737,6 @@ class MoldMakerMainWindow(QMainWindow):
             self.lbl_plane_status.setText("Plane: not set")
         else:
             self.lbl_plane_status.setText(f"Plane: Z = {self._plane_z:.3f} mm")
-
-    def _clear_plane(self) -> None:
-        if self._plane_z is None:
-            return
-
-        self._plane_z = None
-        mesh = self.viewer.mesh
-        if mesh is not None:
-            z_min, z_max = mesh_z_bounds(mesh)
-            preview = z_min + (z_max - z_min) * 0.25
-            self._slider_sync = True
-            self.spin_plane_z.setValue(preview)
-            self._set_slider_from_z(preview)
-            self._slider_sync = False
-            self._preview_z = preview
-
-        self._update_plane_status_label()
-        self._update_plane_z_label()
-        self._refresh_plane_overlays()
-        self._set_controls_enabled(True)
-        self.footer.show_message("Cleared slice plane")
 
     def _slice_at_plane(self) -> None:
         if self._current_path is None or self.viewer.mesh is None:
