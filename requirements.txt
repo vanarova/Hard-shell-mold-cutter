@@ -1,0 +1,11 @@
+PyQt6>=6.6.0
+pyvista>=0.43.0
+pyvistaqt>=0.11.0
+numpy>=1.24.0
+shapely>=2.0.0
+trimesh>=4.0.0
+rtree>=1.0.0
+manifold3d>=2.5.0
+mapbox-earcut>=2.0.0
+scipy>=1.10.0
+scikit-image>=0.21.0
