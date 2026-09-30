@@ -4,9 +4,16 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import pyvista as pv
 
 _PLANE_MARGIN_MM = 2.0
+# Repair planes extend 10% of each in-plane model span beyond both sides
+# (e.g. 100 mm → 10 mm each side → 120 mm total).
+REPAIR_SIDE_MARGIN_FRACTION = 0.10
+_REPAIR_YZ_RX_DEG = 0.0
+_REPAIR_YZ_RY_DEG = 90.0
+_REPAIR_YZ_RZ_DEG = 0.0
 
 
 def mesh_xy_bounds(mesh: pv.PolyData) -> tuple[float, float, float, float]:
@@ -134,3 +141,112 @@ def make_oriented_plane_mesh(
     if abs(rotate_z_deg) > 1e-9:
         plane.rotate_z(float(rotate_z_deg), point=center, inplace=True)
     return plane
+
+
+def repair_yz_default_rotations() -> tuple[float, float, float]:
+    """Default Rx/Ry/Rz that orient a repair plane onto the YZ axis (normal +X)."""
+    return (_REPAIR_YZ_RX_DEG, _REPAIR_YZ_RY_DEG, _REPAIR_YZ_RZ_DEG)
+
+
+def _normalize_vector(vector: np.ndarray) -> np.ndarray:
+    length = float(np.linalg.norm(vector))
+    if length < 1e-12:
+        return np.array([0.0, 0.0, 1.0], dtype=float)
+    return vector / length
+
+
+def repair_plane_basis(normal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """In-plane axes for a repair plane (same convention as wrap sampling)."""
+    n = _normalize_vector(np.asarray(normal, dtype=float))
+    helper = np.array([1.0, 0.0, 0.0], dtype=float)
+    if abs(float(n[0])) > 0.9:
+        helper = np.array([0.0, 0.0, 1.0], dtype=float)
+    i_axis = _normalize_vector(np.cross(helper, n))
+    j_axis = _normalize_vector(np.cross(n, i_axis))
+    return i_axis, j_axis
+
+
+def repair_plane_half_extents(
+    mesh: pv.PolyData,
+    normal: tuple[float, float, float] | np.ndarray,
+    *,
+    side_margin_fraction: float = REPAIR_SIDE_MARGIN_FRACTION,
+) -> tuple[float, float]:
+    """
+    Half-sizes of a repair plane covering the model in its local i/j axes.
+
+    Each in-plane span is the projected model AABB extent, enlarged by
+    ``side_margin_fraction`` on both sides (0.10 → 20% longer total, e.g.
+    100 mm → 120 mm).
+    """
+    xmin, xmax, ymin, ymax, zmin, zmax = (float(v) for v in mesh.bounds)
+    corners = np.array(
+        [
+            [xmin, ymin, zmin],
+            [xmin, ymin, zmax],
+            [xmin, ymax, zmin],
+            [xmin, ymax, zmax],
+            [xmax, ymin, zmin],
+            [xmax, ymin, zmax],
+            [xmax, ymax, zmin],
+            [xmax, ymax, zmax],
+        ],
+        dtype=float,
+    )
+    i_axis, j_axis = repair_plane_basis(np.asarray(normal, dtype=float))
+    ui = corners @ i_axis
+    vj = corners @ j_axis
+    span_i = max(float(ui.max() - ui.min()), 1e-3)
+    span_j = max(float(vj.max() - vj.min()), 1e-3)
+    scale = 1.0 + 2.0 * float(side_margin_fraction)
+    return 0.5 * span_i * scale, 0.5 * span_j * scale
+
+
+def make_repair_plane_mesh(
+    mesh: pv.PolyData,
+    *,
+    center_x: float,
+    center_y: float,
+    center_z: float,
+    rotate_x_deg: float = _REPAIR_YZ_RX_DEG,
+    rotate_y_deg: float = _REPAIR_YZ_RY_DEG,
+    rotate_z_deg: float = _REPAIR_YZ_RZ_DEG,
+    side_margin_fraction: float = REPAIR_SIDE_MARGIN_FRACTION,
+    resolution: int = 2,
+) -> pv.PolyData:
+    """
+    Build a repair plane (default YZ / normal +X) sized to the model footprint
+    in the plane, plus ``side_margin_fraction`` beyond both sides on each axis.
+    """
+    center = np.array(
+        [float(center_x), float(center_y), float(center_z)], dtype=float
+    )
+    normal = np.asarray(
+        plane_normal_from_rotations(rotate_x_deg, rotate_y_deg, rotate_z_deg),
+        dtype=float,
+    )
+    half_i, half_j = repair_plane_half_extents(
+        mesh,
+        normal,
+        side_margin_fraction=side_margin_fraction,
+    )
+    i_axis, j_axis = repair_plane_basis(normal)
+    res = max(2, int(resolution))
+    u = np.linspace(-half_i, half_i, res)
+    v = np.linspace(-half_j, half_j, res)
+    uu, vv = np.meshgrid(u, v, indexing="xy")
+    points = (
+        center[None, None, :]
+        + uu[:, :, None] * i_axis[None, None, :]
+        + vv[:, :, None] * j_axis[None, None, :]
+    ).reshape(-1, 3)
+
+    faces: list[int] = []
+    for j in range(res - 1):
+        for i in range(res - 1):
+            a = j * res + i
+            b = a + 1
+            c = a + res + 1
+            d = a + res
+            faces.extend([4, a, b, c, d])
+    return pv.PolyData(points, np.asarray(faces, dtype=np.int64))

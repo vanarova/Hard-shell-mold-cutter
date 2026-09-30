@@ -176,14 +176,17 @@ class StlViewer(QWidget):
             self._mesh = mesh
         self._redraw_mesh(preserve_camera=True)
 
-    def set_mesh(self, mesh: pv.PolyData) -> None:
+    def set_mesh(self, mesh: pv.PolyData, *, reset_camera: bool = True) -> None:
         """Replace the currently displayed mesh."""
         surface = mesh.extract_surface(algorithm="dataset_surface").triangulate()
         self._mesh = surface
         self._scene_meshes = [surface]
         self._selected_index = 0
         self._overlays = []
-        self._redraw_mesh(reset_camera=True)
+        if reset_camera:
+            self._redraw_mesh(reset_camera=True)
+        else:
+            self._redraw_mesh(preserve_camera=True)
 
     def set_overlays(self, overlays: list[OverlayMesh]) -> None:
         """Replace overlay meshes drawn on top of the primary model."""

@@ -42,6 +42,12 @@ from app.plane_deform import (
     plane_half_extent,
     pose_frame,
 )
+from app.model_repair import (
+    DEFAULT_STOP_AFTER_WALLS,
+    MAX_STOP_AFTER_WALLS,
+    MIN_STOP_AFTER_WALLS,
+    fill_gaps_between_planes,
+)
 from app.plane_wrap import (
     DEFAULT_POINT_DENSITY,
     MAX_POINT_DENSITY,
@@ -53,11 +59,13 @@ from app.slice_axis import output_dir_for_stl
 from app.stl_viewer import OVERLAY_COLOR, OverlayMesh, StlViewer
 from app.xy_plane import (
     make_oriented_plane_mesh,
+    make_repair_plane_mesh,
     mesh_center_xy,
     mesh_x_bounds,
     mesh_y_bounds,
     mesh_z_bounds,
     plane_origin,
+    repair_yz_default_rotations,
 )
 import numpy as np
 
@@ -78,6 +86,11 @@ _WRAP_BACK_COLOR = "#89dceb"
 _BACKEND_COLOR = "#fab387"
 _BACK_START_PREVIEW_COLOR = "#f5c2e7"
 _BACK_START_CONFIRMED_COLOR = "#cba6f7"
+_REPAIR_START_PREVIEW_COLOR = "#f2cdcd"
+_REPAIR_START_CONFIRMED_COLOR = "#eba0ac"
+_REPAIR_END_PREVIEW_COLOR = "#b4befe"
+_REPAIR_END_CONFIRMED_COLOR = "#cba6f7"
+_FILL_GAPS_COLOR = "#f38ba8"
 _CTRL_POINT_COLOR = "#f9e2af"
 _CTRL_SELECTED_COLOR = "#f38ba8"
 _DISP_SLIDER_STEPS = 1000
@@ -196,6 +209,8 @@ class MoldWrapperMainWindow(QMainWindow):
         self._slider_sync = False
         self._wrap_mesh = None
         self._wrap_back_mesh = None
+        self._fill_gaps_mesh = None
+        self._fill_gaps_path = None
         self._copied_end_mesh = None
         self._backend_snapshot: BackendSnapshot | None = None
         self._end_ctrl_uv = place_equidistant_uv(DEFAULT_CONTROL_POINTS)
@@ -204,7 +219,23 @@ class MoldWrapperMainWindow(QMainWindow):
         self._end_ctrl_world_points: np.ndarray | None = None
         self._deform_sync = False
         self._back_start_grid_n = _DEFAULT_BACK_START_GRID
+        self._show_wrap_planes = False
+        self._source_mesh = None
+        self._model_rx = 0.0
+        self._model_ry = 0.0
+        self._model_rz = 0.0
+        self._model_rot_sync = False
 
+        self._repair_start = PlanePanel(
+            title="Repair Start Plane",
+            preview_color=_REPAIR_START_PREVIEW_COLOR,
+            confirmed_color=_REPAIR_START_CONFIRMED_COLOR,
+        )
+        self._repair_end = PlanePanel(
+            title="Repair End Plane",
+            preview_color=_REPAIR_END_PREVIEW_COLOR,
+            confirmed_color=_REPAIR_END_CONFIRMED_COLOR,
+        )
         self._start = PlanePanel(
             title="Start Plane",
             preview_color=_START_PREVIEW_COLOR,
@@ -299,11 +330,23 @@ class MoldWrapperMainWindow(QMainWindow):
         file_layout.addWidget(self.lbl_file)
 
         layout.addWidget(file_group)
+        layout.addWidget(self._build_model_rotate_group())
+        layout.addWidget(self._build_model_repair_section())
 
-        layout.addWidget(self._build_plane_group(self._start))
-        layout.addWidget(self._build_start_plane_points_group())
-        layout.addWidget(self._build_plane_group(self._end))
-        layout.addWidget(self._build_end_deform_group())
+        self.btn_toggle_wrap_planes = QPushButton("Show Start / End Planes")
+        self.btn_toggle_wrap_planes.setCheckable(True)
+        self.btn_toggle_wrap_planes.setChecked(False)
+        self.btn_toggle_wrap_planes.toggled.connect(self._on_toggle_wrap_planes)
+        layout.addWidget(self.btn_toggle_wrap_planes)
+
+        self._wrap_planes_panel = QWidget()
+        wrap_planes_layout = QVBoxLayout(self._wrap_planes_panel)
+        wrap_planes_layout.setContentsMargins(0, 0, 0, 0)
+        wrap_planes_layout.setSpacing(12)
+        wrap_planes_layout.addWidget(self._build_plane_group(self._start))
+        wrap_planes_layout.addWidget(self._build_start_plane_points_group())
+        wrap_planes_layout.addWidget(self._build_plane_group(self._end))
+        wrap_planes_layout.addWidget(self._build_end_deform_group())
 
         backend_group = QGroupBox("Backend Plane")
         backend_layout = QVBoxLayout(backend_group)
@@ -326,8 +369,8 @@ class MoldWrapperMainWindow(QMainWindow):
         self.chk_show_backend.toggled.connect(self._on_show_copied_end_toggled)
         backend_layout.addWidget(self.chk_show_backend)
 
-        layout.addWidget(backend_group)
-        layout.addWidget(self._build_plane_group(self._back_start))
+        wrap_planes_layout.addWidget(backend_group)
+        wrap_planes_layout.addWidget(self._build_plane_group(self._back_start))
 
         wrap_group = QGroupBox("Wrap")
         wrap_layout = QVBoxLayout(wrap_group)
@@ -350,11 +393,199 @@ class MoldWrapperMainWindow(QMainWindow):
         self.btn_wrap_back.clicked.connect(self._wrap_back)
         wrap_layout.addWidget(self.btn_wrap_back)
 
-        layout.addWidget(wrap_group)
+        wrap_planes_layout.addWidget(wrap_group)
+        self._wrap_planes_panel.setVisible(False)
+        layout.addWidget(self._wrap_planes_panel)
         layout.addStretch()
 
         scroll.setWidget(panel)
         return scroll
+
+    def _build_model_rotate_group(self) -> QGroupBox:
+        group = QGroupBox("Model Rotation")
+        layout = QVBoxLayout(group)
+
+        info = QLabel(
+            "Rotate the loaded model about its center on X, Y, and Z. "
+            "Use the slider or type an exact angle. Planes reset to match "
+            "the new orientation."
+        )
+        info.setWordWrap(True)
+        info.setObjectName("fileLabel")
+        layout.addWidget(info)
+
+        self.lbl_model_rx, self.slider_model_rx, self.spin_model_rx = (
+            self._add_model_rotation_axis(layout, "x")
+        )
+        self.lbl_model_ry, self.slider_model_ry, self.spin_model_ry = (
+            self._add_model_rotation_axis(layout, "y")
+        )
+        self.lbl_model_rz, self.slider_model_rz, self.spin_model_rz = (
+            self._add_model_rotation_axis(layout, "z")
+        )
+
+        self.btn_reset_model_rotation = QPushButton("Reset Model Rotation")
+        self.btn_reset_model_rotation.setEnabled(False)
+        self.btn_reset_model_rotation.clicked.connect(self._reset_model_rotation)
+        layout.addWidget(self.btn_reset_model_rotation)
+
+        return group
+
+    def _add_model_rotation_axis(
+        self,
+        layout: QVBoxLayout,
+        axis: AxisName,
+    ) -> tuple[QLabel, QSlider, QDoubleSpinBox]:
+        axis_upper = axis.upper()
+        lbl = QLabel(f"Rotate {axis_upper}: 0°")
+        lbl.setObjectName("fileLabel")
+        layout.addWidget(lbl)
+
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setRange(-180, 180)
+        slider.setValue(0)
+        slider.setEnabled(False)
+        slider.valueChanged.connect(
+            lambda value, a=axis: self._on_model_rot_slider_changed(a, value)
+        )
+        layout.addWidget(slider)
+
+        row = QHBoxLayout()
+        exact_label = QLabel(f"Exact {axis_upper} (°)")
+        exact_label.setWordWrap(True)
+        row.addWidget(exact_label, stretch=1)
+        spin = QDoubleSpinBox()
+        spin.setRange(-180.0, 180.0)
+        spin.setDecimals(1)
+        spin.setSingleStep(1.0)
+        spin.setSuffix(" °")
+        spin.setValue(0.0)
+        spin.setMinimumWidth(88)
+        spin.setEnabled(False)
+        spin.valueChanged.connect(
+            lambda value, a=axis: self._on_model_rot_spin_changed(a, value)
+        )
+        row.addWidget(spin)
+        layout.addLayout(row)
+
+        return lbl, slider, spin
+
+    def _build_model_repair_section(self) -> QGroupBox:
+        group = QGroupBox("Model Repair")
+        layout = QVBoxLayout(group)
+
+        info = QLabel(
+            "Place YZ repair start/end planes (model-sized, +10% each side), "
+            "then Fill Gaps. Rays travel from start toward end along X. Filling "
+            "begins when a ray hits the model and stops after N further walls "
+            "(default 1 = stop at the next layer; higher values ignore "
+            "intermediate inner walls). If N is larger than the walls remaining, "
+            "the ray stops at the end plane. Set N to -1 to fill from the first "
+            "hit through the last exit, spanning all intermediate layers as a "
+            "solid inside the model (no extrusion outside)."
+        )
+        info.setWordWrap(True)
+        info.setObjectName("fileLabel")
+        layout.addWidget(info)
+
+        layout.addWidget(self._build_plane_group(self._repair_start))
+        layout.addWidget(self._build_repair_start_points_group())
+        layout.addWidget(self._build_plane_group(self._repair_end))
+
+        walls_row = QHBoxLayout()
+        walls_label = QLabel("Stop after walls")
+        walls_label.setWordWrap(True)
+        walls_label.setToolTip(
+            "Number of model walls after the entry hit that stop extrusion. "
+            "1 = stop at the first opposing wall; higher values skip "
+            "intermediate inner walls. If fewer walls remain, stop at the "
+            "repair end plane. -1 = fill from first entry to last exit "
+            "(solid inside the model)."
+        )
+        walls_row.addWidget(walls_label, stretch=1)
+        self.spin_stop_after_walls = QSpinBox()
+        self.spin_stop_after_walls.setRange(
+            MIN_STOP_AFTER_WALLS, MAX_STOP_AFTER_WALLS
+        )
+        self.spin_stop_after_walls.setValue(DEFAULT_STOP_AFTER_WALLS)
+        self.spin_stop_after_walls.setMinimumWidth(88)
+        self.spin_stop_after_walls.setEnabled(False)
+        self.spin_stop_after_walls.setToolTip(walls_label.toolTip())
+        self._prev_stop_after_walls = DEFAULT_STOP_AFTER_WALLS
+        walls_row.addWidget(self.spin_stop_after_walls)
+        layout.addLayout(walls_row)
+
+        self.lbl_stop_after_walls = QLabel("")
+        self.lbl_stop_after_walls.setObjectName("fileLabel")
+        self.lbl_stop_after_walls.setWordWrap(True)
+        layout.addWidget(self.lbl_stop_after_walls)
+        self.spin_stop_after_walls.valueChanged.connect(
+            self._on_stop_after_walls_changed
+        )
+        self._update_stop_after_walls_label()
+
+        self.btn_fill_gaps = QPushButton("Fill Gaps")
+        self.btn_fill_gaps.setEnabled(False)
+        self.btn_fill_gaps.clicked.connect(self._fill_gaps)
+        layout.addWidget(self.btn_fill_gaps)
+
+        self.btn_download_filled = QPushButton("Download Filled Model")
+        self.btn_download_filled.setEnabled(False)
+        self.btn_download_filled.clicked.connect(self._download_filled_model)
+        layout.addWidget(self.btn_download_filled)
+
+        return group
+
+    def _on_toggle_wrap_planes(self, checked: bool) -> None:
+        self._show_wrap_planes = bool(checked)
+        self._wrap_planes_panel.setVisible(self._show_wrap_planes)
+        self.btn_toggle_wrap_planes.setText(
+            "Hide Start / End Planes"
+            if self._show_wrap_planes
+            else "Show Start / End Planes"
+        )
+        self._refresh_plane_overlays()
+        if self._show_wrap_planes:
+            self.footer.show_message("Start / End wrap planes shown")
+        else:
+            self.footer.show_message("Start / End wrap planes hidden")
+
+    def _build_repair_start_points_group(self) -> QGroupBox:
+        group = QGroupBox("Repair Start Plane Points")
+        layout = QVBoxLayout(group)
+
+        info = QLabel(
+            "Set an N × N sampling grid on the Repair Start plane for Fill Gaps."
+        )
+        info.setWordWrap(True)
+        info.setObjectName("fileLabel")
+        layout.addWidget(info)
+
+        density_row = QHBoxLayout()
+        density_label = QLabel("Point density (per side)")
+        density_label.setWordWrap(True)
+        density_row.addWidget(density_label, stretch=1)
+        self.spin_repair_point_density = QSpinBox()
+        self.spin_repair_point_density.setRange(
+            MIN_POINT_DENSITY, MAX_POINT_DENSITY
+        )
+        self.spin_repair_point_density.setSingleStep(10)
+        self.spin_repair_point_density.setValue(DEFAULT_POINT_DENSITY)
+        self.spin_repair_point_density.setMinimumWidth(88)
+        self.spin_repair_point_density.setEnabled(False)
+        self.spin_repair_point_density.valueChanged.connect(
+            self._update_repair_density_label
+        )
+        density_row.addWidget(self.spin_repair_point_density)
+        layout.addLayout(density_row)
+
+        self.lbl_repair_point_density = QLabel("")
+        self.lbl_repair_point_density.setObjectName("fileLabel")
+        self.lbl_repair_point_density.setWordWrap(True)
+        layout.addWidget(self.lbl_repair_point_density)
+        self._update_repair_density_label()
+
+        return group
 
     def _build_start_plane_points_group(self) -> QGroupBox:
         group = QGroupBox("Start Plane Points")
@@ -629,6 +860,44 @@ class MoldWrapperMainWindow(QMainWindow):
             f"Plane samples: {density} × {density} = {total:,} points"
         )
 
+    def _update_repair_density_label(self, _value: int | None = None) -> None:
+        density = self.spin_repair_point_density.value()
+        total = density * density
+        self.lbl_repair_point_density.setText(
+            f"Repair samples: {density} × {density} = {total:,} points"
+        )
+
+    def _on_stop_after_walls_changed(self, value: int) -> None:
+        # Skip 0: jump between -1 (fill to exit) and 1+.
+        if value == 0:
+            target = 1 if self._prev_stop_after_walls < 0 else -1
+            self.spin_stop_after_walls.blockSignals(True)
+            self.spin_stop_after_walls.setValue(target)
+            self.spin_stop_after_walls.blockSignals(False)
+            value = target
+        self._prev_stop_after_walls = int(value)
+        self._update_stop_after_walls_label()
+
+    def _update_stop_after_walls_label(self, _value: int | None = None) -> None:
+        n = self.spin_stop_after_walls.value()
+        if n == -1:
+            self.lbl_stop_after_walls.setText(
+                "Fill to last exit: start at first model hit, stop at the last "
+                "hit leaving the model. Intermediate layers are filled; nothing "
+                "extrudes outside the model."
+            )
+            return
+        if n == 1:
+            detail = "stop at the first wall after entry"
+        else:
+            detail = (
+                f"ignore {n - 1} intermediate wall(s), stop at wall #{n}"
+            )
+        self.lbl_stop_after_walls.setText(
+            f"After entry hit: {detail}. "
+            "If fewer walls remain, stop at the end plane."
+        )
+
     def _match_end_to_start(self) -> None:
         """Copy start plane position and rotation onto the end plane."""
         if self.viewer.mesh is None or not self._start.preview.is_complete:
@@ -671,12 +940,34 @@ class MoldWrapperMainWindow(QMainWindow):
     def _planes_ready(self) -> bool:
         return self._start.confirmed.is_complete and self._end.confirmed.is_complete
 
+    def _repair_planes_ready(self) -> bool:
+        return (
+            self._repair_start.confirmed.is_complete
+            and self._repair_end.confirmed.is_complete
+        )
+
     def _set_controls_enabled(self, enabled: bool) -> None:
         self.btn_open.setEnabled(enabled)
         has_mesh = self.viewer.mesh is not None
+        self.slider_model_rx.setEnabled(enabled and has_mesh)
+        self.slider_model_ry.setEnabled(enabled and has_mesh)
+        self.slider_model_rz.setEnabled(enabled and has_mesh)
+        self.spin_model_rx.setEnabled(enabled and has_mesh)
+        self.spin_model_ry.setEnabled(enabled and has_mesh)
+        self.spin_model_rz.setEnabled(enabled and has_mesh)
+        self.btn_reset_model_rotation.setEnabled(enabled and has_mesh)
+        self.btn_toggle_wrap_planes.setEnabled(enabled and has_mesh)
         self.btn_match_end_to_start.setEnabled(enabled and has_mesh)
         self.spin_point_density.setEnabled(enabled and has_mesh)
+        self.spin_repair_point_density.setEnabled(enabled and has_mesh)
+        self.spin_stop_after_walls.setEnabled(enabled and has_mesh)
         self.btn_wrap_plane.setEnabled(enabled and has_mesh and self._planes_ready())
+        self.btn_fill_gaps.setEnabled(
+            enabled and has_mesh and self._repair_planes_ready()
+        )
+        self.btn_download_filled.setEnabled(
+            enabled and self._fill_gaps_mesh is not None
+        )
         self.btn_wrap_back.setEnabled(
             enabled
             and has_mesh
@@ -701,7 +992,13 @@ class MoldWrapperMainWindow(QMainWindow):
         self.btn_match_back_start_to_backend.setEnabled(
             enabled and has_mesh and self._backend_snapshot is not None
         )
-        for plane in (self._start, self._end, self._back_start):
+        for plane in (
+            self._repair_start,
+            self._repair_end,
+            self._start,
+            self._end,
+            self._back_start,
+        ):
             self._set_plane_controls_enabled(plane, enabled and has_mesh)
 
     def _set_plane_controls_enabled(self, plane: PlanePanel, enabled: bool) -> None:
@@ -775,10 +1072,20 @@ class MoldWrapperMainWindow(QMainWindow):
 
         self._current_path = path
         self.lbl_file.setText(path.name)
+        self._source_mesh = mesh.copy(deep=True)
+        self._reset_model_rotation_controls(apply_mesh=False)
+        self._show_wrap_planes = False
+        self.btn_toggle_wrap_planes.blockSignals(True)
+        self.btn_toggle_wrap_planes.setChecked(False)
+        self.btn_toggle_wrap_planes.blockSignals(False)
+        self.btn_toggle_wrap_planes.setText("Show Start / End Planes")
+        self._wrap_planes_panel.setVisible(False)
         self._update_size_label(mesh)
         self._reset_all_planes()
         self._wrap_mesh = None
         self._wrap_back_mesh = None
+        self._fill_gaps_mesh = None
+        self._fill_gaps_path = None
         self._copied_end_mesh = None
         self._backend_snapshot = None
         self._reset_end_deform()
@@ -788,10 +1095,103 @@ class MoldWrapperMainWindow(QMainWindow):
             f"Loaded {path.name} — {mesh.n_cells:,} triangles"
         )
 
+    def _update_model_rotation_labels(self) -> None:
+        self.lbl_model_rx.setText(f"Rotate X: {self._model_rx:.1f}°")
+        self.lbl_model_ry.setText(f"Rotate Y: {self._model_ry:.1f}°")
+        self.lbl_model_rz.setText(f"Rotate Z: {self._model_rz:.1f}°")
+
+    def _reset_model_rotation_controls(self, *, apply_mesh: bool) -> None:
+        self._model_rot_sync = True
+        self.slider_model_rx.setValue(0)
+        self.slider_model_ry.setValue(0)
+        self.slider_model_rz.setValue(0)
+        self.spin_model_rx.setValue(0.0)
+        self.spin_model_ry.setValue(0.0)
+        self.spin_model_rz.setValue(0.0)
+        self._model_rot_sync = False
+        self._model_rx = 0.0
+        self._model_ry = 0.0
+        self._model_rz = 0.0
+        self._update_model_rotation_labels()
+        if apply_mesh:
+            self._apply_model_rotation(reset_camera=True)
+
+    def _reset_model_rotation(self) -> None:
+        if self._source_mesh is None:
+            return
+        self._reset_model_rotation_controls(apply_mesh=True)
+        self.footer.show_message("Model rotation reset")
+
+    def _set_model_rotation_value(self, axis: AxisName, value: float) -> None:
+        clamped = float(min(max(value, -180.0), 180.0))
+        if axis == "x":
+            self._model_rx = clamped
+            slider, spin = self.slider_model_rx, self.spin_model_rx
+        elif axis == "y":
+            self._model_ry = clamped
+            slider, spin = self.slider_model_ry, self.spin_model_ry
+        else:
+            self._model_rz = clamped
+            slider, spin = self.slider_model_rz, self.spin_model_rz
+
+        self._model_rot_sync = True
+        slider.setValue(int(round(clamped)))
+        spin.setValue(clamped)
+        self._model_rot_sync = False
+        self._update_model_rotation_labels()
+        self._apply_model_rotation(reset_camera=False)
+
+    def _on_model_rot_slider_changed(self, axis: AxisName, value: int) -> None:
+        if self._model_rot_sync:
+            return
+        self._set_model_rotation_value(axis, float(value))
+
+    def _on_model_rot_spin_changed(self, axis: AxisName, value: float) -> None:
+        if self._model_rot_sync:
+            return
+        self._set_model_rotation_value(axis, float(value))
+
+    def _apply_model_rotation(self, *, reset_camera: bool) -> None:
+        if self._source_mesh is None:
+            return
+
+        rotated = self._source_mesh.copy(deep=True)
+        center = rotated.center
+        if abs(self._model_rx) > 1e-9:
+            rotated.rotate_x(self._model_rx, point=center, inplace=True)
+        if abs(self._model_ry) > 1e-9:
+            rotated.rotate_y(self._model_ry, point=center, inplace=True)
+        if abs(self._model_rz) > 1e-9:
+            rotated.rotate_z(self._model_rz, point=center, inplace=True)
+
+        self.viewer.set_mesh(rotated, reset_camera=reset_camera)
+        self.viewer.set_view_mode(self.footer.current_view_mode())
+        self._update_size_label(rotated)
+        self._reset_all_planes()
+        self._wrap_mesh = None
+        self._wrap_back_mesh = None
+        self._fill_gaps_mesh = None
+        self._fill_gaps_path = None
+        self._copied_end_mesh = None
+        self._backend_snapshot = None
+        self._reset_end_deform()
+        self._init_plane_controls(rotated)
+        self._set_controls_enabled(True)
+        self.footer.show_message(
+            f"Model rotated Rx={self._model_rx:.0f}° "
+            f"Ry={self._model_ry:.0f}° Rz={self._model_rz:.0f}°"
+        )
+
     def _reset_all_planes(self) -> None:
         self.viewer.set_point_pick_callback(None)
         self.viewer.clear_overlays()
-        for plane in (self._start, self._end, self._back_start):
+        for plane in (
+            self._repair_start,
+            self._repair_end,
+            self._start,
+            self._end,
+            self._back_start,
+        ):
             plane.confirmed.clear_confirmed()
             plane.preview = PlanePose()
             self._slider_sync = True
@@ -835,12 +1235,54 @@ class MoldWrapperMainWindow(QMainWindow):
 
         cx, cy = mesh_center_xy(mesh)
         # Default Z still uses the model body range (without pad) for a sensible start.
+        body_x_min, body_x_max = mesh_x_bounds(mesh)
+        body_y_min, body_y_max = mesh_y_bounds(mesh)
         body_z_min, body_z_max = mesh_z_bounds(mesh)
+        if body_x_max <= body_x_min:
+            body_x_max = body_x_min + 1.0
+        if body_y_max <= body_y_min:
+            body_y_max = body_y_min + 1.0
         if body_z_max <= body_z_min:
             body_z_max = body_z_min + 1.0
+        cz = body_z_min + (body_z_max - body_z_min) * 0.5
+        cy_body = body_y_min + (body_y_max - body_y_min) * 0.5
         start_z = body_z_min + (body_z_max - body_z_min) * 0.25
         end_z = body_z_min + (body_z_max - body_z_min) * 0.75
         back_start_z = body_z_min + (body_z_max - body_z_min) * 0.5
+        repair_start_x = body_x_min + (body_x_max - body_x_min) * 0.1
+        repair_end_x = body_x_min + (body_x_max - body_x_min) * 0.9
+        repair_rx, repair_ry, repair_rz = repair_yz_default_rotations()
+
+        # Repair planes: YZ orientation (normal +X), sized to model Y/Z +10%/side.
+        for plane, x in (
+            (self._repair_start, repair_start_x),
+            (self._repair_end, repair_end_x),
+        ):
+            assert plane.slider_rx is not None
+            assert plane.slider_ry is not None
+            assert plane.slider_rz is not None
+            self._slider_sync = True
+            for axis, lo, hi, value in (
+                ("x", x_min, x_max, x),
+                ("y", y_min, y_max, cy_body),
+                ("z", z_min, z_max, cz),
+            ):
+                spin = plane.spin_for(axis)  # type: ignore[arg-type]
+                assert spin is not None
+                spin.setRange(lo, hi)
+                spin.setValue(value)
+                self._set_slider_from_axis(plane, axis, value)  # type: ignore[arg-type]
+            plane.slider_rx.setValue(int(round(repair_rx)))
+            plane.slider_ry.setValue(int(round(repair_ry)))
+            plane.slider_rz.setValue(int(round(repair_rz)))
+            self._slider_sync = False
+            plane.preview.reset_preview(x, cy_body, cz)
+            plane.preview.rx = float(repair_rx)
+            plane.preview.ry = float(repair_ry)
+            plane.preview.rz = float(repair_rz)
+            self._update_plane_position_labels(plane)
+            self._update_plane_rotation_labels(plane)
+            self._update_plane_status_label(plane)
 
         for plane, z in (
             (self._start, start_z),
@@ -985,6 +1427,23 @@ class MoldWrapperMainWindow(QMainWindow):
             rotate_z_deg=pose.rz,
         )
 
+    def _repair_plane_mesh(self, mesh, pose: PlanePose):
+        assert pose.is_complete
+        return make_repair_plane_mesh(
+            mesh,
+            center_x=float(pose.x),
+            center_y=float(pose.y),
+            center_z=float(pose.z),
+            rotate_x_deg=pose.rx,
+            rotate_y_deg=pose.ry,
+            rotate_z_deg=pose.rz,
+        )
+
+    def _plane_mesh_for(self, plane: PlanePanel, mesh, pose: PlanePose):
+        if plane in (self._repair_start, self._repair_end):
+            return self._repair_plane_mesh(mesh, pose)
+        return self._oriented_plane_mesh(mesh, pose)
+
     def _end_pose_for_deform(self) -> PlanePose | None:
         if self._end.preview.is_complete:
             return self._end.preview
@@ -1090,6 +1549,7 @@ class MoldWrapperMainWindow(QMainWindow):
         edge_color: str,
         *,
         deformed: bool = False,
+        plane: PlanePanel | None = None,
     ) -> None:
         if not pose.is_complete:
             return
@@ -1109,6 +1569,8 @@ class MoldWrapperMainWindow(QMainWindow):
                 uv=self._end_ctrl_uv,
                 displacements=self._end_ctrl_disp,
             )
+        elif plane is not None:
+            plane_mesh = self._plane_mesh_for(plane, mesh, pose)
         else:
             plane_mesh = self._oriented_plane_mesh(mesh, pose)
         overlays.append(
@@ -1182,94 +1644,143 @@ class MoldWrapperMainWindow(QMainWindow):
             return
 
         overlays: list[OverlayMesh] = []
-        # Start plane (flat).
+        # Repair planes (YZ, model-sized +10% each side).
         self._append_plane_overlay(
             overlays,
             mesh,
-            self._start.confirmed,
-            self._start.confirmed_color,
-            0.32,
-            "#74c7ec",
+            self._repair_start.confirmed,
+            self._repair_start.confirmed_color,
+            0.28,
+            "#e64553",
+            plane=self._repair_start,
         )
         self._append_plane_overlay(
             overlays,
             mesh,
-            self._start.preview,
-            self._start.preview_color,
-            0.42,
+            self._repair_start.preview,
+            self._repair_start.preview_color,
+            0.38,
             OVERLAY_COLOR,
-        )
-        # End plane (deformed by control points).
-        self._append_plane_overlay(
-            overlays,
-            mesh,
-            self._end.confirmed,
-            self._end.confirmed_color,
-            0.32,
-            "#74c7ec",
-            deformed=True,
+            plane=self._repair_start,
         )
         self._append_plane_overlay(
             overlays,
             mesh,
-            self._end.preview,
-            self._end.preview_color,
-            0.42,
+            self._repair_end.confirmed,
+            self._repair_end.confirmed_color,
+            0.28,
+            "#7287fd",
+            plane=self._repair_end,
+        )
+        self._append_plane_overlay(
+            overlays,
+            mesh,
+            self._repair_end.preview,
+            self._repair_end.preview_color,
+            0.38,
             OVERLAY_COLOR,
-            deformed=True,
+            plane=self._repair_end,
         )
-        self._append_end_control_overlays(overlays, mesh)
-        if (
-            self._copied_end_mesh is not None
-            and self.chk_show_backend.isChecked()
-        ):
-            overlays.append(
-                OverlayMesh(
-                    mesh=self._copied_end_mesh,
-                    color=_BACKEND_COLOR,
-                    opacity=0.55,
-                    style="surface",
-                    show_edges=True,
-                    edge_color="#fe640b",
-                )
+        # Start / End wrap planes (hidden until toggled on).
+        if self._show_wrap_planes:
+            self._append_plane_overlay(
+                overlays,
+                mesh,
+                self._start.confirmed,
+                self._start.confirmed_color,
+                0.32,
+                "#74c7ec",
             )
-        # Back-start plane (flat, movable).
-        self._append_plane_overlay(
-            overlays,
-            mesh,
-            self._back_start.confirmed,
-            self._back_start.confirmed_color,
-            0.32,
-            "#b4befe",
-        )
-        self._append_plane_overlay(
-            overlays,
-            mesh,
-            self._back_start.preview,
-            self._back_start.preview_color,
-            0.42,
-            OVERLAY_COLOR,
-        )
-        if self._wrap_mesh is not None:
+            self._append_plane_overlay(
+                overlays,
+                mesh,
+                self._start.preview,
+                self._start.preview_color,
+                0.42,
+                OVERLAY_COLOR,
+            )
+            # End plane (deformed by control points).
+            self._append_plane_overlay(
+                overlays,
+                mesh,
+                self._end.confirmed,
+                self._end.confirmed_color,
+                0.32,
+                "#74c7ec",
+                deformed=True,
+            )
+            self._append_plane_overlay(
+                overlays,
+                mesh,
+                self._end.preview,
+                self._end.preview_color,
+                0.42,
+                OVERLAY_COLOR,
+                deformed=True,
+            )
+            self._append_end_control_overlays(overlays, mesh)
+            if (
+                self._copied_end_mesh is not None
+                and self.chk_show_backend.isChecked()
+            ):
+                overlays.append(
+                    OverlayMesh(
+                        mesh=self._copied_end_mesh,
+                        color=_BACKEND_COLOR,
+                        opacity=0.55,
+                        style="surface",
+                        show_edges=True,
+                        edge_color="#fe640b",
+                    )
+                )
+            # Back-start plane (flat, movable).
+            self._append_plane_overlay(
+                overlays,
+                mesh,
+                self._back_start.confirmed,
+                self._back_start.confirmed_color,
+                0.32,
+                "#b4befe",
+            )
+            self._append_plane_overlay(
+                overlays,
+                mesh,
+                self._back_start.preview,
+                self._back_start.preview_color,
+                0.42,
+                OVERLAY_COLOR,
+            )
+            if self._wrap_mesh is not None:
+                overlays.append(
+                    OverlayMesh(
+                        mesh=self._wrap_mesh,
+                        color=_WRAP_COLOR,
+                        opacity=0.85,
+                        style="surface",
+                        show_edges=True,
+                        edge_color="#b4befe",
+                    )
+                )
+            if self._wrap_back_mesh is not None:
+                overlays.append(
+                    OverlayMesh(
+                        mesh=self._wrap_back_mesh,
+                        color=_WRAP_BACK_COLOR,
+                        opacity=0.85,
+                        style="surface",
+                        show_edges=True,
+                        edge_color="#74c7ec",
+                    )
+                )
+        if self._fill_gaps_mesh is not None:
             overlays.append(
                 OverlayMesh(
-                    mesh=self._wrap_mesh,
-                    color=_WRAP_COLOR,
+                    mesh=self._fill_gaps_mesh,
+                    color=_FILL_GAPS_COLOR,
                     opacity=0.85,
                     style="surface",
                     show_edges=True,
-                    edge_color="#b4befe",
-                )
-            )
-        if self._wrap_back_mesh is not None:
-            overlays.append(
-                OverlayMesh(
-                    mesh=self._wrap_back_mesh,
-                    color=_WRAP_BACK_COLOR,
-                    opacity=0.85,
-                    style="surface",
-                    show_edges=True,
-                    edge_color="#74c7ec",
+                    edge_color="#e64553",
                 )
             )
         self.viewer.set_overlays(overlays)
@@ -1278,7 +1789,8 @@ class MoldWrapperMainWindow(QMainWindow):
     def _sync_end_ctrl_click_picking(self) -> None:
         """Enable click-to-select for end control points."""
         can_pick = (
-            self._end_pose_for_deform() is not None
+            self._show_wrap_planes
+            and self._end_pose_for_deform() is not None
             and self._end_ctrl_world_points is not None
             and len(self._end_ctrl_world_points) > 0
         )
@@ -1525,6 +2037,129 @@ class MoldWrapperMainWindow(QMainWindow):
             f"Saved to:\n{result.output_path}",
         )
         self.footer.show_message(f"Wrap plane saved → {result.output_path.name}")
+
+    def _fill_gaps(self) -> None:
+        if self._current_path is None or self.viewer.mesh is None:
+            return
+
+        if not self._repair_planes_ready():
+            QMessageBox.warning(
+                self,
+                "Repair Planes Required",
+                "Confirm both the repair start plane and the repair end plane "
+                "before filling gaps.",
+            )
+            return
+
+        start = self._repair_start.confirmed
+        end = self._repair_end.confirmed
+        assert start.is_complete and end.is_complete
+
+        model_mesh = self.viewer.mesh
+        output_dir = output_dir_for_stl(self._current_path)
+        progress = self._progress_callback()
+
+        start_origin = plane_origin(
+            model_mesh,
+            start.z,  # type: ignore[arg-type]
+            x=start.x,
+            y=start.y,
+        )
+        end_origin = plane_origin(
+            model_mesh,
+            end.z,  # type: ignore[arg-type]
+            x=end.x,
+            y=end.y,
+        )
+
+        def run_fill():
+            return fill_gaps_between_planes(
+                model_mesh,
+                output_dir,
+                start_origin=start_origin,
+                start_rx_deg=start.rx,
+                start_ry_deg=start.ry,
+                start_rz_deg=start.rz,
+                end_origin=end_origin,
+                end_rx_deg=end.rx,
+                end_ry_deg=end.ry,
+                end_rz_deg=end.rz,
+                density=self.spin_repair_point_density.value(),
+                stop_after_walls=self.spin_stop_after_walls.value(),
+                progress=progress,
+            )
+
+        try:
+            result = self._run_busy("Filling gaps…", run_fill)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Fill Gaps Error", f"Fill gaps failed:\n{exc}")
+            return
+
+        self._fill_gaps_mesh = result.fill_mesh
+        self._fill_gaps_path = result.output_path
+        self._refresh_plane_overlays()
+        self._set_controls_enabled(True)
+
+        QMessageBox.information(
+            self,
+            "Fill Gaps Complete",
+            f"Filled gap segments with {result.point_count:,} samples "
+            f"({result.density} × {result.density}).\n\n"
+            f"Filled rays: {result.filled_count:,}\n"
+            f"Skipped rays: {result.skipped_count:,}\n"
+            f"Stop after walls: {result.stop_after_walls}\n\n"
+            f"Saved to:\n{result.output_path}",
+        )
+        self.footer.show_message(f"Fill gaps saved → {result.output_path.name}")
+
+    def _download_filled_model(self) -> None:
+        if self._fill_gaps_mesh is None:
+            QMessageBox.information(
+                self,
+                "Download Filled Model",
+                "Run Fill Gaps first to create a filled model.",
+            )
+            return
+
+        default_name = "fill_gaps.stl"
+        if self._current_path is not None:
+            default_name = f"{self._current_path.stem}_fill_gaps.stl"
+        start_dir = ""
+        if getattr(self, "_fill_gaps_path", None) is not None:
+            start_dir = str(self._fill_gaps_path)
+        elif self._current_path is not None:
+            start_dir = str(self._current_path.with_name(default_name))
+
+        path_str, _ = QFileDialog.getSaveFileName(
+            self,
+            "Download Filled Model",
+            start_dir,
+            "STL Files (*.stl);;All Files (*)",
+        )
+        if not path_str:
+            return
+
+        output_path = Path(path_str)
+        if output_path.suffix.lower() != ".stl":
+            output_path = output_path.with_suffix(".stl")
+
+        try:
+            self._fill_gaps_mesh.save(str(output_path))
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self,
+                "Download Error",
+                f"Could not save filled model:\n{exc}",
+            )
+            return
+
+        self._fill_gaps_path = output_path
+        self.footer.show_message(f"Filled model saved → {output_path.name}")
+        QMessageBox.information(
+            self,
+            "Download Complete",
+            f"Filled model saved to:\n{output_path}",
+        )
 
     def _wrap_back(self) -> None:
         if self._current_path is None or self.viewer.mesh is None:
