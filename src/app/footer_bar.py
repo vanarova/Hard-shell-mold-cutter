@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QProgressBar,
+    QSlider,
     QVBoxLayout,
     QWidget,
 )
@@ -27,6 +28,8 @@ class FooterBar(QFrame):
     """Footer showing operation progress and STL view mode controls."""
 
     view_mode_changed = pyqtSignal(str)
+    plane_opacity_changed = pyqtSignal(float)
+    model_opacity_changed = pyqtSignal(float)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -68,6 +71,23 @@ class FooterBar(QFrame):
 
         root.addLayout(status_column, stretch=1)
 
+        opacity_column = QVBoxLayout()
+        opacity_column.setSpacing(4)
+
+        self.slider_plane_opacity = self._add_opacity_slider(
+            opacity_column,
+            label="Planes",
+            tooltip="Transparency of planes / overlays (left = more transparent).",
+        )
+        self.slider_model_opacity = self._add_opacity_slider(
+            opacity_column,
+            label="Model",
+            tooltip="Transparency of the loaded model (left = more transparent).",
+        )
+        self.slider_plane_opacity.valueChanged.connect(self._emit_plane_opacity)
+        self.slider_model_opacity.valueChanged.connect(self._emit_model_opacity)
+        root.addLayout(opacity_column)
+
         view_row = QHBoxLayout()
         view_row.setSpacing(8)
 
@@ -89,13 +109,50 @@ class FooterBar(QFrame):
         self._timer.timeout.connect(self._animate_spinner)
         self._set_idle_appearance()
 
+    def _add_opacity_slider(
+        self,
+        parent_layout: QVBoxLayout,
+        *,
+        label: str,
+        tooltip: str,
+    ) -> QSlider:
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        lbl = QLabel(label)
+        lbl.setObjectName("footerOpacityLabel")
+        lbl.setToolTip(tooltip)
+        lbl.setFixedWidth(48)
+        row.addWidget(lbl)
+
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setObjectName("footerOpacitySlider")
+        slider.setRange(0, 100)
+        slider.setValue(100)
+        slider.setFixedWidth(110)
+        slider.setToolTip(tooltip)
+        row.addWidget(slider)
+        parent_layout.addLayout(row)
+        return slider
+
     def _emit_view_mode(self) -> None:
         mode = self.cmb_view_mode.currentData()
         if mode:
             self.view_mode_changed.emit(str(mode))
 
+    def _emit_plane_opacity(self, value: int) -> None:
+        self.plane_opacity_changed.emit(max(0.0, min(1.0, value / 100.0)))
+
+    def _emit_model_opacity(self, value: int) -> None:
+        self.model_opacity_changed.emit(max(0.0, min(1.0, value / 100.0)))
+
     def current_view_mode(self) -> str:
         return str(self.cmb_view_mode.currentData() or "solid_edges")
+
+    def current_plane_opacity(self) -> float:
+        return max(0.0, min(1.0, self.slider_plane_opacity.value() / 100.0))
+
+    def current_model_opacity(self) -> float:
+        return max(0.0, min(1.0, self.slider_model_opacity.value() / 100.0))
 
     def _animate_spinner(self) -> None:
         self._spinner_index = (self._spinner_index + 1) % len(self._spinner_frames)

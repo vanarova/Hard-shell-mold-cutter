@@ -60,6 +60,8 @@ class StlViewer(QWidget):
         self._actor = None
         self._mesh_actor = None
         self._view_mode = "solid_edges"
+        self._model_opacity = 1.0
+        self._overlay_opacity_scale = 1.0
         self._point_pick_callback: Callable[[tuple[float, float, float]], None] | None = None
         self._display_click_callback: Callable[[float, float], None] | None = None
 
@@ -108,6 +110,24 @@ class StlViewer(QWidget):
             return
 
         self._redraw_mesh(preserve_camera=True)
+
+    def set_model_opacity(self, opacity: float) -> None:
+        """Set primary model opacity in [0, 1]."""
+        clamped = max(0.0, min(1.0, float(opacity)))
+        if abs(clamped - self._model_opacity) < 1e-6:
+            return
+        self._model_opacity = clamped
+        if self._mesh is not None:
+            self._redraw_mesh(preserve_camera=True)
+
+    def set_overlay_opacity_scale(self, scale: float) -> None:
+        """Scale all overlay/plane opacities by a factor in [0, 1]."""
+        clamped = max(0.0, min(1.0, float(scale)))
+        if abs(clamped - self._overlay_opacity_scale) < 1e-6:
+            return
+        self._overlay_opacity_scale = clamped
+        if self._mesh is not None:
+            self._redraw_mesh(preserve_camera=True)
 
     def set_scene_meshes(self, meshes: list[pv.PolyData], *, reset_camera: bool = False) -> None:
         """Replace all meshes shown in the scene."""
@@ -365,7 +385,7 @@ class StlViewer(QWidget):
                 show_edges=overlay.show_edges,
                 edge_color=overlay.edge_color,
                 line_width=1,
-                opacity=overlay.opacity,
+                opacity=max(0.0, min(1.0, overlay.opacity * self._overlay_opacity_scale)),
                 smooth_shading=True,
                 lighting=True,
                 pickable=False,
@@ -412,6 +432,7 @@ class StlViewer(QWidget):
         mode = self._view_mode
         color = SELECTED_COLOR if selected else MESH_COLOR
         edge_color = "#fab387" if selected else EDGE_COLOR
+        model_opacity = max(0.0, min(1.0, self._model_opacity))
 
         if mode == "solid":
             return self.plotter.add_mesh(
@@ -419,7 +440,7 @@ class StlViewer(QWidget):
                 color=color,
                 style="surface",
                 show_edges=False,
-                opacity=1.0,
+                opacity=model_opacity,
                 smooth_shading=True,
                 lighting=True,
                 pickable=pickable,
@@ -433,7 +454,7 @@ class StlViewer(QWidget):
                 show_edges=True,
                 edge_color=edge_color,
                 line_width=2,
-                opacity=1.0,
+                opacity=model_opacity,
                 smooth_shading=True,
                 lighting=True,
                 pickable=pickable,
@@ -447,6 +468,7 @@ class StlViewer(QWidget):
                     color=WIREFRAME_COLOR,
                     line_width=2,
                     render_lines_as_tubes=True,
+                    opacity=model_opacity,
                     lighting=False,
                     pickable=pickable,
                 )
@@ -456,7 +478,7 @@ class StlViewer(QWidget):
                 style="wireframe",
                 show_edges=True,
                 line_width=2,
-                opacity=1.0,
+                opacity=model_opacity,
                 lighting=False,
                 pickable=pickable,
             )
@@ -467,7 +489,7 @@ class StlViewer(QWidget):
                 color=MESH_COLOR,
                 style="surface",
                 show_edges=False,
-                opacity=0.35,
+                opacity=0.35 * model_opacity,
                 smooth_shading=True,
                 lighting=True,
                 pickable=pickable,
@@ -480,7 +502,7 @@ class StlViewer(QWidget):
                 style="points",
                 render_points_as_spheres=True,
                 point_size=8,
-                opacity=1.0,
+                opacity=model_opacity,
                 lighting=False,
                 pickable=pickable,
             )
@@ -491,6 +513,7 @@ class StlViewer(QWidget):
             style="surface",
             show_edges=True,
             edge_color=EDGE_COLOR,
+            opacity=model_opacity,
             lighting=True,
             pickable=pickable,
         )

@@ -73,6 +73,8 @@ class MainWindow(QMainWindow):
 
         self.footer = FooterBar()
         self.footer.view_mode_changed.connect(self.viewer.set_view_mode)
+        self.footer.plane_opacity_changed.connect(self.viewer.set_overlay_opacity_scale)
+        self.footer.model_opacity_changed.connect(self.viewer.set_model_opacity)
         viewer_layout.addWidget(self.footer)
 
         root_layout.addWidget(viewer_column, stretch=1)
@@ -756,6 +758,25 @@ def apply_stylesheet(app: QApplication) -> None:
         }
         QLabel#footerViewLabel {
             color: #a6adc8;
+        }
+        QLabel#footerOpacityLabel {
+            color: #a6adc8;
+            font-size: 11px;
+        }
+        QSlider#footerOpacitySlider::groove:horizontal {
+            height: 4px;
+            background: #313244;
+            border-radius: 2px;
+        }
+        QSlider#footerOpacitySlider::handle:horizontal {
+            width: 12px;
+            margin: -5px 0;
+            background: #89b4fa;
+            border-radius: 6px;
+        }
+        QSlider#footerOpacitySlider::sub-page:horizontal {
+            background: #89b4fa;
+            border-radius: 2px;
         }
         QProgressBar#footerProgress {
             background-color: #1e1e2e;

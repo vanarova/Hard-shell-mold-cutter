@@ -155,6 +155,66 @@ def remesh_uniform(
     )
 
 
+def _count_boundary_edges(mesh: trimesh.Trimesh) -> int:
+    """Return the number of open (hole) edges on the mesh surface."""
+    if len(mesh.faces) == 0 or len(mesh.edges_unique) == 0:
+        return 0
+    # Count == 1 means the edge appears once → open boundary (hole).
+    _edges, counts = np.unique(mesh.edges_sorted, axis=0, return_counts=True)
+    return int(np.count_nonzero(counts == 1))
+
+
+def _remove_internal_components(mesh: trimesh.Trimesh) -> tuple[trimesh.Trimesh, int]:
+    """
+    Keep exterior shells and drop components whose centroids lie inside another body.
+
+    Returns the cleaned mesh and how many internal components were removed.
+    """
+    parts = mesh.split(only_watertight=False)
+    if len(parts) <= 1:
+        return mesh, 0
+
+    def _part_score(part: trimesh.Trimesh) -> float:
+        if part.is_watertight:
+            try:
+                return float(abs(part.volume))
+            except Exception:  # noqa: BLE001
+                pass
+        return float(len(part.faces))
+
+    parts = sorted(parts, key=_part_score, reverse=True)
+    kept: list[trimesh.Trimesh] = []
+    removed = 0
+
+    for part in parts:
+        if len(part.faces) == 0:
+            removed += 1
+            continue
+
+        centroid = np.asarray(part.centroid, dtype=float).reshape(1, 3)
+        is_internal = False
+        for outer in kept:
+            if not outer.is_watertight:
+                continue
+            try:
+                if bool(outer.contains(centroid)[0]):
+                    is_internal = True
+                    break
+            except Exception:  # noqa: BLE001
+                continue
+
+        if is_internal:
+            removed += 1
+        else:
+            kept.append(part)
+
+    if not kept:
+        return mesh, 0
+    if len(kept) == 1:
+        return kept[0], removed
+    return trimesh.util.concatenate(kept), removed
+
+
 def make_watertight(
     mesh: pv.PolyData,
     progress: ProgressCallback | None = None,
@@ -188,6 +248,98 @@ def make_watertight(
         mesh=result,
         triangle_count=int(result.n_cells),
         message=f"Mesh is {status} — {result.n_cells:,} triangles",
+    )
+
+
+def _fill_surface_holes(mesh: pv.PolyData) -> trimesh.Trimesh:
+    """Fill open surface holes with PyVista, then stitch remaining gaps via trimesh."""
+    surface = mesh.extract_surface(algorithm="dataset_surface").triangulate()
+    if surface.n_cells == 0:
+        raise ValueError("Model has no surface triangles to repair.")
+
+    tm = _cleanup_trimesh(polydata_to_trimesh(surface))
+    holes = _count_boundary_edges(tm)
+    if holes == 0:
+        trimesh.repair.fix_normals(tm)
+        return tm
+
+    extents = np.asarray(surface.bounds, dtype=float).reshape(2, 3)
+    span = float(np.max(extents[1] - extents[0]))
+    # hole_size is the max circumsphere radius of a hole to fill.
+    hole_size = max(span * 0.35, 1.0)
+
+    try:
+        filled = surface.fill_holes(hole_size)
+        tm = _cleanup_trimesh(polydata_to_trimesh(filled))
+    except Exception:  # noqa: BLE001
+        pass
+
+    trimesh.repair.fix_normals(tm)
+    trimesh.repair.fill_holes(tm)
+    return _cleanup_trimesh(tm)
+
+
+def fix_model_holes(
+    mesh: pv.PolyData,
+    progress: ProgressCallback | None = None,
+) -> MeshOpResult:
+    """
+    Scan the model surface for holes, fill/stitch them, then remove internal mesh.
+
+    Fast path for Fill Gaps results: no voxel solidify (that step was multi-minute
+    on dense fills). Fill Gaps now emits exterior-only shells, so hole fill +
+    component cleanup is enough.
+    """
+    if progress is not None:
+        progress("Scanning surface for holes", 0, 4)
+
+    try:
+        holes_before = _count_boundary_edges(polydata_to_trimesh(mesh))
+    except Exception:  # noqa: BLE001
+        holes_before = 0
+
+    if progress is not None:
+        progress("Filling and stitching holes", 1, 4)
+
+    try:
+        tm = _fill_surface_holes(mesh)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"Hole fill / stitch failed: {exc}") from exc
+
+    if len(tm.faces) == 0:
+        raise ValueError("Model has no surface triangles after hole fill.")
+
+    holes_after_fill = _count_boundary_edges(tm)
+
+    if progress is not None:
+        progress("Removing internal components", 2, 4)
+
+    try:
+        tm, removed_internal = _remove_internal_components(tm)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"Could not remove internal mesh: {exc}") from exc
+
+    if progress is not None:
+        progress("Manifold cleanup", 3, 4)
+
+    tm = _try_manifold_cleanup(tm)
+    holes_after = _count_boundary_edges(tm)
+
+    if progress is not None:
+        progress("Fix model complete", 4, 4)
+
+    result = _validate_polydata(trimesh_to_polydata(tm), "Fix model / Holes")
+    status = "watertight solid" if tm.is_watertight else "repaired (may still have open edges)"
+    return MeshOpResult(
+        mesh=result,
+        triangle_count=int(result.n_cells),
+        message=(
+            f"Fixed model — {status}. "
+            f"Open edges before/after fill: {holes_before:,}/{holes_after_fill:,} "
+            f"(final {holes_after:,}). "
+            f"Internal components removed: {removed_internal}. "
+            f"Triangles: {result.n_cells:,}."
+        ),
     )
 
 

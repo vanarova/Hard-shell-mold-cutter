@@ -16,7 +16,7 @@ _IDW_EPS = 1e-8
 
 DEFAULT_CONTROL_POINTS = 9
 MIN_CONTROL_POINTS = 1
-MAX_CONTROL_POINTS = 64
+MAX_CONTROL_POINTS = 100
 
 
 def _normalize(vector: np.ndarray) -> np.ndarray:

@@ -95,6 +95,8 @@ class MoldMakerMainWindow(QMainWindow):
 
         self.footer = FooterBar()
         self.footer.view_mode_changed.connect(self.viewer.set_view_mode)
+        self.footer.plane_opacity_changed.connect(self.viewer.set_overlay_opacity_scale)
+        self.footer.model_opacity_changed.connect(self.viewer.set_model_opacity)
         viewer_layout.addWidget(self.footer)
 
         root_layout.addWidget(viewer_column, stretch=1)

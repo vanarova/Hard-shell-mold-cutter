@@ -42,6 +42,7 @@ from app.plane_deform import (
     plane_half_extent,
     pose_frame,
 )
+from app.mesh_ops import fix_model_holes
 from app.model_repair import (
     DEFAULT_STOP_AFTER_WALLS,
     MAX_STOP_AFTER_WALLS,
@@ -96,8 +97,8 @@ _CTRL_SELECTED_COLOR = "#f38ba8"
 _DISP_SLIDER_STEPS = 1000
 _DEFAULT_BACK_START_GRID = 10
 _MIN_BACK_START_GRID = 2
-_MAX_BACK_START_GRID = 316  # 316² ≈ 99,856 ≤ 100,000
-_MAX_BACK_START_POINTS = 100_000
+_MAX_BACK_START_GRID = 2000
+_MAX_BACK_START_POINTS = 2000 * 2000
 _CTRL_PICK_PIXEL_RADIUS = 28.0
 
 
@@ -219,6 +220,7 @@ class MoldWrapperMainWindow(QMainWindow):
         self._end_ctrl_world_points: np.ndarray | None = None
         self._deform_sync = False
         self._back_start_grid_n = _DEFAULT_BACK_START_GRID
+        self._show_repair_planes = False
         self._show_wrap_planes = False
         self._source_mesh = None
         self._model_rx = 0.0
@@ -276,6 +278,8 @@ class MoldWrapperMainWindow(QMainWindow):
 
         self.footer = FooterBar()
         self.footer.view_mode_changed.connect(self.viewer.set_view_mode)
+        self.footer.plane_opacity_changed.connect(self.viewer.set_overlay_opacity_scale)
+        self.footer.model_opacity_changed.connect(self.viewer.set_model_opacity)
         viewer_layout.addWidget(self.footer)
 
         root_layout.addWidget(viewer_column, stretch=1)
@@ -331,7 +335,16 @@ class MoldWrapperMainWindow(QMainWindow):
 
         layout.addWidget(file_group)
         layout.addWidget(self._build_model_rotate_group())
-        layout.addWidget(self._build_model_repair_section())
+
+        self.btn_toggle_repair_planes = QPushButton("Show Model Repair Planes")
+        self.btn_toggle_repair_planes.setCheckable(True)
+        self.btn_toggle_repair_planes.setChecked(False)
+        self.btn_toggle_repair_planes.toggled.connect(self._on_toggle_repair_planes)
+        layout.addWidget(self.btn_toggle_repair_planes)
+
+        self._repair_planes_panel = self._build_model_repair_section()
+        self._repair_planes_panel.setVisible(False)
+        layout.addWidget(self._repair_planes_panel)
 
         self.btn_toggle_wrap_planes = QPushButton("Show Start / End Planes")
         self.btn_toggle_wrap_planes.setCheckable(True)
@@ -529,12 +542,36 @@ class MoldWrapperMainWindow(QMainWindow):
         self.btn_fill_gaps.clicked.connect(self._fill_gaps)
         layout.addWidget(self.btn_fill_gaps)
 
+        self.btn_fix_holes = QPushButton("Fix model / Holes")
+        self.btn_fix_holes.setEnabled(False)
+        self.btn_fix_holes.setToolTip(
+            "Run on the Fill Gaps result: fill/stitch surface holes and remove "
+            "disconnected internal components. Requires Fill Gaps first. "
+            "Re-run Fill Gaps if the filled model was created with an older build."
+        )
+        self.btn_fix_holes.clicked.connect(self._fix_model_holes)
+        layout.addWidget(self.btn_fix_holes)
+
         self.btn_download_filled = QPushButton("Download Filled Model")
         self.btn_download_filled.setEnabled(False)
         self.btn_download_filled.clicked.connect(self._download_filled_model)
         layout.addWidget(self.btn_download_filled)
 
         return group
+
+    def _on_toggle_repair_planes(self, checked: bool) -> None:
+        self._show_repair_planes = bool(checked)
+        self._repair_planes_panel.setVisible(self._show_repair_planes)
+        self.btn_toggle_repair_planes.setText(
+            "Hide Model Repair Planes"
+            if self._show_repair_planes
+            else "Show Model Repair Planes"
+        )
+        self._refresh_plane_overlays()
+        if self._show_repair_planes:
+            self.footer.show_message("Model repair planes shown")
+        else:
+            self.footer.show_message("Model repair planes hidden")
 
     def _on_toggle_wrap_planes(self, checked: bool) -> None:
         self._show_wrap_planes = bool(checked)
@@ -965,6 +1002,9 @@ class MoldWrapperMainWindow(QMainWindow):
         self.btn_fill_gaps.setEnabled(
             enabled and has_mesh and self._repair_planes_ready()
         )
+        self.btn_fix_holes.setEnabled(
+            enabled and self._fill_gaps_mesh is not None
+        )
         self.btn_download_filled.setEnabled(
             enabled and self._fill_gaps_mesh is not None
         )
@@ -1074,6 +1114,12 @@ class MoldWrapperMainWindow(QMainWindow):
         self.lbl_file.setText(path.name)
         self._source_mesh = mesh.copy(deep=True)
         self._reset_model_rotation_controls(apply_mesh=False)
+        self._show_repair_planes = False
+        self.btn_toggle_repair_planes.blockSignals(True)
+        self.btn_toggle_repair_planes.setChecked(False)
+        self.btn_toggle_repair_planes.blockSignals(False)
+        self.btn_toggle_repair_planes.setText("Show Model Repair Planes")
+        self._repair_planes_panel.setVisible(False)
         self._show_wrap_planes = False
         self.btn_toggle_wrap_planes.blockSignals(True)
         self.btn_toggle_wrap_planes.setChecked(False)
@@ -1644,43 +1690,44 @@ class MoldWrapperMainWindow(QMainWindow):
             return
 
         overlays: list[OverlayMesh] = []
-        # Repair planes (YZ, model-sized +10% each side).
-        self._append_plane_overlay(
-            overlays,
-            mesh,
-            self._repair_start.confirmed,
-            self._repair_start.confirmed_color,
-            0.28,
-            "#e64553",
-            plane=self._repair_start,
-        )
-        self._append_plane_overlay(
-            overlays,
-            mesh,
-            self._repair_start.preview,
-            self._repair_start.preview_color,
-            0.38,
-            OVERLAY_COLOR,
-            plane=self._repair_start,
-        )
-        self._append_plane_overlay(
-            overlays,
-            mesh,
-            self._repair_end.confirmed,
-            self._repair_end.confirmed_color,
-            0.28,
-            "#7287fd",
-            plane=self._repair_end,
-        )
-        self._append_plane_overlay(
-            overlays,
-            mesh,
-            self._repair_end.preview,
-            self._repair_end.preview_color,
-            0.38,
-            OVERLAY_COLOR,
-            plane=self._repair_end,
-        )
+        # Repair planes (hidden until toggled on).
+        if self._show_repair_planes:
+            self._append_plane_overlay(
+                overlays,
+                mesh,
+                self._repair_start.confirmed,
+                self._repair_start.confirmed_color,
+                0.28,
+                "#e64553",
+                plane=self._repair_start,
+            )
+            self._append_plane_overlay(
+                overlays,
+                mesh,
+                self._repair_start.preview,
+                self._repair_start.preview_color,
+                0.38,
+                OVERLAY_COLOR,
+                plane=self._repair_start,
+            )
+            self._append_plane_overlay(
+                overlays,
+                mesh,
+                self._repair_end.confirmed,
+                self._repair_end.confirmed_color,
+                0.28,
+                "#7287fd",
+                plane=self._repair_end,
+            )
+            self._append_plane_overlay(
+                overlays,
+                mesh,
+                self._repair_end.preview,
+                self._repair_end.preview_color,
+                0.38,
+                OVERLAY_COLOR,
+                plane=self._repair_end,
+            )
         # Start / End wrap planes (hidden until toggled on).
         if self._show_wrap_planes:
             self._append_plane_overlay(
@@ -2111,6 +2158,63 @@ class MoldWrapperMainWindow(QMainWindow):
             f"Saved to:\n{result.output_path}",
         )
         self.footer.show_message(f"Fill gaps saved → {result.output_path.name}")
+
+    def _fix_model_holes(self) -> None:
+        if self._fill_gaps_mesh is None:
+            QMessageBox.warning(
+                self,
+                "Fill Gaps Required",
+                "Run Fill Gaps first. Fix model / Holes works on the filled "
+                "model, not the originally loaded STL.",
+            )
+            return
+
+        source = self._fill_gaps_mesh
+        progress = self._progress_callback()
+
+        def run_fix():
+            return fix_model_holes(source, progress=progress)
+
+        try:
+            result = self._run_busy("Fixing model holes…", run_fix)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self,
+                "Fix Model / Holes Failed",
+                f"The operation could not complete:\n{exc}",
+            )
+            self.footer.show_message("Fix model / Holes failed")
+            return
+
+        self._fill_gaps_mesh = result.mesh
+        if self._current_path is not None:
+            try:
+                output_dir = output_dir_for_stl(self._current_path)
+                output_path = output_dir / "fill_gaps_fixed.stl"
+                result.mesh.save(str(output_path))
+                self._fill_gaps_path = output_path
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.warning(
+                    self,
+                    "Save Warning",
+                    f"Fixed model is ready in the viewer, but saving failed:\n{exc}",
+                )
+
+        self._refresh_plane_overlays()
+        self._set_controls_enabled(True)
+
+        saved_note = ""
+        if self._fill_gaps_path is not None:
+            saved_note = f"\n\nSaved to:\n{self._fill_gaps_path}"
+
+        QMessageBox.information(
+            self,
+            "Fix Model / Holes Complete",
+            f"{result.message}{saved_note}",
+        )
+        self.footer.show_message(
+            f"Fixed filled model — {result.triangle_count:,} triangles"
+        )
 
     def _download_filled_model(self) -> None:
         if self._fill_gaps_mesh is None:

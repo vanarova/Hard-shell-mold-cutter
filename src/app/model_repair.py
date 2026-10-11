@@ -205,7 +205,12 @@ def _build_extruded_solid_masked(
     top: np.ndarray,
     filled: np.ndarray,
 ) -> pv.PolyData:
-    """Extrude only grid quads whose four corners successfully filled a gap."""
+    """
+    Extrude only grid quads whose four corners successfully filled a gap.
+
+    Side walls are emitted only on the exterior of the filled region so the
+    solid has no internal cell walls (keeps Fix model / Holes fast).
+    """
     if bottom.shape != top.shape or bottom.ndim != 3 or bottom.shape[2] != 3:
         raise ValueError("Bottom and top grids must both have shape (n, n, 3).")
     if filled.shape != bottom.shape[:2]:
@@ -219,6 +224,19 @@ def _build_extruded_solid_masked(
     if bool(np.all(filled)):
         return _build_extruded_solid(bottom, top)
 
+    # A quad cell is filled only when all four corner samples succeeded.
+    cell = (
+        filled[:-1, :-1]
+        & filled[:-1, 1:]
+        & filled[1:, :-1]
+        & filled[1:, 1:]
+    )
+    if not bool(np.any(cell)):
+        raise ValueError(
+            "No gap segments were filled. Move the repair planes so rays "
+            "cross hollow regions, or lower the stop-after-walls count."
+        )
+
     n_plane = ny * nx
     vertices = np.vstack([bottom.reshape(-1, 3), top.reshape(-1, 3)])
 
@@ -227,47 +245,34 @@ def _build_extruded_solid_masked(
 
     tri_faces: list[list[int]] = []
 
-    def quad_filled(j: int, i: int) -> bool:
-        return bool(
-            filled[j, i]
-            and filled[j, i + 1]
-            and filled[j + 1, i]
-            and filled[j + 1, i + 1]
-        )
+    def add_quad(i0: int, i1: int, i2: int, i3: int) -> None:
+        tri_faces.append([i0, i1, i2])
+        tri_faces.append([i0, i2, i3])
 
-    for j in range(ny - 1):
-        for i in range(nx - 1):
-            if not quad_filled(j, i):
-                continue
-            a = vid(j, i, 0)
-            b = vid(j, i + 1, 0)
-            c = vid(j + 1, i + 1, 0)
-            d = vid(j + 1, i, 0)
-            tri_faces.append([a, d, c])
-            tri_faces.append([a, c, b])
+    cell_rows, cell_cols = np.nonzero(cell)
+    for j, i in zip(cell_rows.tolist(), cell_cols.tolist(), strict=True):
+        a = vid(j, i, 0)
+        b = vid(j, i + 1, 0)
+        c = vid(j + 1, i + 1, 0)
+        d = vid(j + 1, i, 0)
+        a1 = vid(j, i, 1)
+        b1 = vid(j, i + 1, 1)
+        c1 = vid(j + 1, i + 1, 1)
+        d1 = vid(j + 1, i, 1)
 
-            a1 = vid(j, i, 1)
-            b1 = vid(j, i + 1, 1)
-            c1 = vid(j + 1, i + 1, 1)
-            d1 = vid(j + 1, i, 1)
-            tri_faces.append([a1, b1, c1])
-            tri_faces.append([a1, c1, d1])
+        # Bottom / top caps.
+        add_quad(a, d, c, b)
+        add_quad(a1, b1, c1, d1)
 
-            # Side walls for this prism cell.
-            tri_faces.append([a, b, b1])
-            tri_faces.append([a, b1, a1])
-            tri_faces.append([b, c, c1])
-            tri_faces.append([b, c1, b1])
-            tri_faces.append([c, d, d1])
-            tri_faces.append([c, d1, c1])
-            tri_faces.append([d, a, a1])
-            tri_faces.append([d, a1, d1])
-
-    if not tri_faces:
-        raise ValueError(
-            "No gap segments were filled. Move the repair planes so rays "
-            "cross hollow regions, or lower the stop-after-walls count."
-        )
+        # Exterior side walls only (skip shared walls between filled neighbors).
+        if j == 0 or not cell[j - 1, i]:
+            add_quad(a, b, b1, a1)
+        if i == nx - 2 or not cell[j, i + 1]:
+            add_quad(b, c, c1, b1)
+        if j == ny - 2 or not cell[j + 1, i]:
+            add_quad(c, d, d1, c1)
+        if i == 0 or not cell[j, i - 1]:
+            add_quad(d, a, a1, d1)
 
     faces_np = np.asarray(tri_faces, dtype=np.int64)
     pv_faces = np.hstack(
@@ -277,6 +282,7 @@ def _build_extruded_solid_masked(
         ]
     ).ravel()
     solid = pv.PolyData(vertices, pv_faces)
+    # Drop unused grid vertices left by the sparse filled mask.
     return solid.triangulate().clean()
 
 
