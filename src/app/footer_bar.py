@@ -41,11 +41,11 @@ class FooterBar(QFrame):
         self._busy = False
 
         root = QHBoxLayout(self)
-        root.setContentsMargins(12, 8, 12, 8)
+        root.setContentsMargins(12, 6, 12, 6)
         root.setSpacing(12)
 
         status_column = QVBoxLayout()
-        status_column.setSpacing(4)
+        status_column.setSpacing(2)
 
         status_row = QHBoxLayout()
         status_row.setSpacing(8)
@@ -65,7 +65,8 @@ class FooterBar(QFrame):
         self.progress.setObjectName("footerProgress")
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
-        self.progress.setTextVisible(True)
+        self.progress.setTextVisible(False)
+        self.progress.setFixedHeight(8)
         self.progress.setFormat("%p%")
         status_column.addWidget(self.progress)
 

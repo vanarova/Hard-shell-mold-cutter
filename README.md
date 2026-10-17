@@ -57,10 +57,13 @@ launch.bat
 2. Set **Start Plane** and **End Plane** (X/Y/Z, rotate X/Y/Z, pick on model, confirm).
 3. Use **Match End to Start** inside the End Plane section when needed.
 4. Deform the end plane with control points (select from the list or click a point in the 3D view, then pull/push).
-5. **Copy Backend Plane** freezes the curved end surface; optionally show/hide it.
-6. Set **Back-start Plane** (or **Apply Backend Position to Back-start**) and its N×N sample density (up to ~100,000 points; points are not drawn).
+5. Set **Backend Plane Grid** density (N×N, up to 2000×2000; follows Start Plane density when that changes, but can still be overridden). **Copy Backend Plane** freezes the curved end surface at that density; optionally show/hide it.
+6. Set **Back-start Plane** (or **Apply Backend Position to Back-start**) and its N×N sample density (up to 2000×2000; points are not drawn).
 7. **Wrap Plane** extrudes Start → End (stops on model or deformed end).
 8. **Wrap Back** extrudes Back-start → Backend (stops on model or Backend surface).
+9. **Clear Extra Material (Experimental)** ray-casts between the same plane pairs and removes columns that miss the model (plus padding). Can take a very long time at high density. Saves `clear_start_to_end.stl` / `clear_back_start_to_backend.stl`.
+
+Use **Help — Workflow…** in the sidebar for step-by-step Model Fix and Wrap diagrams.
 
 Outputs are written next to the model STL in a folder named after the file (for example `wrap_plane.stl`, `wrap_back_plane.stl`).
 

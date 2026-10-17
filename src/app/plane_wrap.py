@@ -195,10 +195,14 @@ def _ray_stop_on_meshes(
     targets: np.ndarray,
     model_mesh: pv.PolyData,
     stop_mesh: pv.PolyData | None = None,
-) -> tuple[np.ndarray, int, int]:
+    return_hit_mask: bool = False,
+) -> tuple[np.ndarray, int, int] | tuple[np.ndarray, int, int, np.ndarray]:
     """
     Extrude each origin toward its target. Stop at the nearest hit on the model
     or optional stop surface (e.g. backend plane); otherwise land on the target.
+
+    When ``return_hit_mask`` is True, also return a boolean array (one per ray)
+    that is True where the stop landed on the model.
     """
     point_count = origins.shape[0]
     deltas = targets - origins
@@ -250,6 +254,8 @@ def _ray_stop_on_meshes(
 
     hit_model_count = int(np.count_nonzero(hit_model))
     hit_end_count = int(point_count - hit_model_count)
+    if return_hit_mask:
+        return wrapped, hit_model_count, hit_end_count, hit_model
     return wrapped, hit_model_count, hit_end_count
 
 

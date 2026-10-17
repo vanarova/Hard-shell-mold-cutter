@@ -49,6 +49,14 @@ from app.model_repair import (
     MIN_STOP_AFTER_WALLS,
     fill_gaps_between_planes,
 )
+from app.clear_extra_material import (
+    DEFAULT_PADDING_MM,
+    MAX_PADDING_MM,
+    MIN_PADDING_MM,
+    clear_back_start_to_backend,
+    clear_start_to_end,
+)
+from app.workflow_help_dialog import WorkflowHelpDialog
 from app.plane_wrap import (
     DEFAULT_POINT_DENSITY,
     MAX_POINT_DENSITY,
@@ -84,6 +92,8 @@ _END_PREVIEW_COLOR = "#a6e3a1"
 _END_CONFIRMED_COLOR = "#94e2d5"
 _WRAP_COLOR = "#cba6f7"
 _WRAP_BACK_COLOR = "#89dceb"
+_CLEAR_START_COLOR = "#f2cdcd"
+_CLEAR_BACK_COLOR = "#f5c2e7"
 _BACKEND_COLOR = "#fab387"
 _BACK_START_PREVIEW_COLOR = "#f5c2e7"
 _BACK_START_CONFIRMED_COLOR = "#cba6f7"
@@ -99,6 +109,10 @@ _DEFAULT_BACK_START_GRID = 10
 _MIN_BACK_START_GRID = 2
 _MAX_BACK_START_GRID = 2000
 _MAX_BACK_START_POINTS = 2000 * 2000
+_DEFAULT_BACKEND_GRID = 100
+_MIN_BACKEND_GRID = 2
+_MAX_BACKEND_GRID = 2000
+_MAX_BACKEND_POINTS = 2000 * 2000
 _CTRL_PICK_PIXEL_RADIUS = 28.0
 
 
@@ -116,6 +130,7 @@ class BackendSnapshot:
     half_extent: float
     ctrl_uv: np.ndarray
     ctrl_disp: np.ndarray
+    density: int
 
 
 @dataclass
@@ -210,6 +225,8 @@ class MoldWrapperMainWindow(QMainWindow):
         self._slider_sync = False
         self._wrap_mesh = None
         self._wrap_back_mesh = None
+        self._clear_start_mesh = None
+        self._clear_back_mesh = None
         self._fill_gaps_mesh = None
         self._fill_gaps_path = None
         self._copied_end_mesh = None
@@ -220,6 +237,7 @@ class MoldWrapperMainWindow(QMainWindow):
         self._end_ctrl_world_points: np.ndarray | None = None
         self._deform_sync = False
         self._back_start_grid_n = _DEFAULT_BACK_START_GRID
+        self._backend_grid_n = _DEFAULT_BACKEND_GRID
         self._show_repair_planes = False
         self._show_wrap_planes = False
         self._source_mesh = None
@@ -314,6 +332,13 @@ class MoldWrapperMainWindow(QMainWindow):
         subtitle.setObjectName("appSubtitle")
         layout.addWidget(subtitle)
 
+        self.btn_help = QPushButton("Help — Workflow…")
+        self.btn_help.setToolTip(
+            "Open step-by-step diagrams for Model Fix and Wrap workflows."
+        )
+        self.btn_help.clicked.connect(self._show_workflow_help)
+        layout.addWidget(self.btn_help)
+
         layout.addWidget(self._divider())
 
         file_group = QGroupBox("File")
@@ -360,12 +385,14 @@ class MoldWrapperMainWindow(QMainWindow):
         wrap_planes_layout.addWidget(self._build_start_plane_points_group())
         wrap_planes_layout.addWidget(self._build_plane_group(self._end))
         wrap_planes_layout.addWidget(self._build_end_deform_group())
+        wrap_planes_layout.addWidget(self._build_backend_grid_group())
 
         backend_group = QGroupBox("Backend Plane")
         backend_layout = QVBoxLayout(backend_group)
         backend_info = QLabel(
             "Snapshot the end plane in its current curved state at the same "
-            "position. Shown in a different color from the live end plane."
+            "position, using the Backend grid density above. Shown in a "
+            "different color from the live end plane."
         )
         backend_info.setWordWrap(True)
         backend_info.setObjectName("fileLabel")
@@ -407,6 +434,7 @@ class MoldWrapperMainWindow(QMainWindow):
         wrap_layout.addWidget(self.btn_wrap_back)
 
         wrap_planes_layout.addWidget(wrap_group)
+        wrap_planes_layout.addWidget(self._build_clear_extra_group())
         self._wrap_planes_panel.setVisible(False)
         layout.addWidget(self._wrap_planes_panel)
         layout.addStretch()
@@ -645,7 +673,7 @@ class MoldWrapperMainWindow(QMainWindow):
         self.spin_point_density.setValue(DEFAULT_POINT_DENSITY)
         self.spin_point_density.setMinimumWidth(88)
         self.spin_point_density.setEnabled(False)
-        self.spin_point_density.valueChanged.connect(self._update_density_label)
+        self.spin_point_density.valueChanged.connect(self._on_start_density_changed)
         density_row.addWidget(self.spin_point_density)
         layout.addLayout(density_row)
 
@@ -876,12 +904,129 @@ class MoldWrapperMainWindow(QMainWindow):
         self._rebuild_end_ctrl_combo()
         return group
 
+    def _build_clear_extra_group(self) -> QGroupBox:
+        group = QGroupBox("Clear Extra Material (Experimental)")
+        layout = QVBoxLayout(group)
+
+        intro = QLabel(
+            "Experimental — still scales with grid density (same raycast cost "
+            "as Wrap), but padding is now a fast grid dilate instead of slow "
+            "nearest-point queries. Rays that hit the model (plus padding) keep "
+            "material; all other columns are cleared. Each clear saves a new STL."
+        )
+        intro.setWordWrap(True)
+        intro.setObjectName("fileLabel")
+        layout.addWidget(intro)
+
+        start_group = QGroupBox("Clear Start to End")
+        start_layout = QVBoxLayout(start_group)
+        start_info = QLabel(
+            "Uses the Start and End planes (same density as Wrap Plane)."
+        )
+        start_info.setWordWrap(True)
+        start_info.setObjectName("fileLabel")
+        start_layout.addWidget(start_info)
+
+        start_pad_row = QHBoxLayout()
+        start_pad_label = QLabel("Padding (mm)")
+        start_pad_label.setWordWrap(True)
+        start_pad_row.addWidget(start_pad_label, stretch=1)
+        self.spin_clear_start_padding = QDoubleSpinBox()
+        self.spin_clear_start_padding.setDecimals(2)
+        self.spin_clear_start_padding.setRange(MIN_PADDING_MM, MAX_PADDING_MM)
+        self.spin_clear_start_padding.setSingleStep(0.5)
+        self.spin_clear_start_padding.setValue(DEFAULT_PADDING_MM)
+        self.spin_clear_start_padding.setSuffix(" mm")
+        self.spin_clear_start_padding.setMinimumWidth(96)
+        self.spin_clear_start_padding.setEnabled(False)
+        start_pad_row.addWidget(self.spin_clear_start_padding)
+        start_layout.addLayout(start_pad_row)
+
+        self.btn_clear_start = QPushButton("Ray Cast Clear")
+        self.btn_clear_start.setEnabled(False)
+        self.btn_clear_start.clicked.connect(self._clear_start_to_end)
+        start_layout.addWidget(self.btn_clear_start)
+        layout.addWidget(start_group)
+
+        back_group = QGroupBox("Clear Back-start to Backend")
+        back_layout = QVBoxLayout(back_group)
+        back_info = QLabel(
+            "Uses the Back-start and Backend planes (same density as Wrap Back)."
+        )
+        back_info.setWordWrap(True)
+        back_info.setObjectName("fileLabel")
+        back_layout.addWidget(back_info)
+
+        back_pad_row = QHBoxLayout()
+        back_pad_label = QLabel("Padding (mm)")
+        back_pad_label.setWordWrap(True)
+        back_pad_row.addWidget(back_pad_label, stretch=1)
+        self.spin_clear_back_padding = QDoubleSpinBox()
+        self.spin_clear_back_padding.setDecimals(2)
+        self.spin_clear_back_padding.setRange(MIN_PADDING_MM, MAX_PADDING_MM)
+        self.spin_clear_back_padding.setSingleStep(0.5)
+        self.spin_clear_back_padding.setValue(DEFAULT_PADDING_MM)
+        self.spin_clear_back_padding.setSuffix(" mm")
+        self.spin_clear_back_padding.setMinimumWidth(96)
+        self.spin_clear_back_padding.setEnabled(False)
+        back_pad_row.addWidget(self.spin_clear_back_padding)
+        back_layout.addLayout(back_pad_row)
+
+        self.btn_clear_back = QPushButton("Ray Cast Clear")
+        self.btn_clear_back.setEnabled(False)
+        self.btn_clear_back.clicked.connect(self._clear_back_to_backend)
+        back_layout.addWidget(self.btn_clear_back)
+        layout.addWidget(back_group)
+
+        return group
+
+    def _build_backend_grid_group(self) -> QGroupBox:
+        group = QGroupBox("Backend Plane Grid")
+        layout = QVBoxLayout(group)
+
+        info = QLabel(
+            "N × N sampling grid baked into the Backend plane when you copy it "
+            f"(up to {_MAX_BACKEND_POINTS:,} points). Follows Start Plane density "
+            "when that changes; you can still override it here independently. "
+            "Higher density makes Wrap Back smoother when rays stop on the "
+            "Backend surface."
+        )
+        info.setWordWrap(True)
+        info.setObjectName("fileLabel")
+        layout.addWidget(info)
+
+        density_row = QHBoxLayout()
+        density_label = QLabel("Grid density (N per side)")
+        density_label.setWordWrap(True)
+        density_row.addWidget(density_label, stretch=1)
+        self.spin_backend_grid = QSpinBox()
+        self.spin_backend_grid.setRange(_MIN_BACKEND_GRID, _MAX_BACKEND_GRID)
+        self.spin_backend_grid.setSingleStep(10)
+        self.spin_backend_grid.setValue(_DEFAULT_BACKEND_GRID)
+        self.spin_backend_grid.setMinimumWidth(88)
+        self.spin_backend_grid.setEnabled(False)
+        self.spin_backend_grid.valueChanged.connect(self._on_backend_grid_changed)
+        density_row.addWidget(self.spin_backend_grid)
+        layout.addLayout(density_row)
+
+        self.lbl_backend_grid = QLabel("")
+        self.lbl_backend_grid.setObjectName("fileLabel")
+        self.lbl_backend_grid.setWordWrap(True)
+        layout.addWidget(self.lbl_backend_grid)
+        self._update_backend_grid_label()
+
+        return group
+
     @staticmethod
     def _divider() -> QFrame:
         line = QFrame()
         line.setFrameShape(QFrame.Shape.HLine)
         line.setFrameShadow(QFrame.Shadow.Sunken)
         return line
+
+    def _show_workflow_help(self) -> None:
+        dialog = WorkflowHelpDialog(self)
+        dialog.exec()
 
     def _progress_callback(self) -> Callable[[str, int, int], None]:
         def report(message: str, step: int = 0, total: int = 0) -> None:
@@ -896,6 +1041,25 @@ class MoldWrapperMainWindow(QMainWindow):
         self.lbl_point_density.setText(
             f"Plane samples: {density} × {density} = {total:,} points"
         )
+
+    def _on_start_density_changed(self, value: int) -> None:
+        self._update_density_label(value)
+        self._sync_backend_grid_from_start(int(value))
+
+    def _sync_backend_grid_from_start(self, value: int) -> None:
+        """Mirror Start Plane density onto Backend grid (clamped to its range)."""
+        if not hasattr(self, "spin_backend_grid"):
+            return
+        clamped = max(_MIN_BACKEND_GRID, min(_MAX_BACKEND_GRID, int(value)))
+        if self.spin_backend_grid.value() == clamped:
+            self._backend_grid_n = clamped
+            self._update_backend_grid_label()
+            return
+        self.spin_backend_grid.blockSignals(True)
+        self.spin_backend_grid.setValue(clamped)
+        self.spin_backend_grid.blockSignals(False)
+        self._backend_grid_n = clamped
+        self._update_backend_grid_label()
 
     def _update_repair_density_label(self, _value: int | None = None) -> None:
         density = self.spin_repair_point_density.value()
@@ -1014,6 +1178,17 @@ class MoldWrapperMainWindow(QMainWindow):
             and self._backend_snapshot is not None
             and self._back_start_pose() is not None
         )
+        can_clear_start = enabled and has_mesh and self._planes_ready()
+        self.spin_clear_start_padding.setEnabled(can_clear_start)
+        self.btn_clear_start.setEnabled(can_clear_start)
+        can_clear_back = (
+            enabled
+            and has_mesh
+            and self._backend_snapshot is not None
+            and self._back_start_pose() is not None
+        )
+        self.spin_clear_back_padding.setEnabled(can_clear_back)
+        self.btn_clear_back.setEnabled(can_clear_back)
         deform_enabled = enabled and has_mesh and self._end.preview.is_complete
         self.spin_end_ctrl_count.setEnabled(deform_enabled)
         self.combo_end_ctrl_point.setEnabled(deform_enabled)
@@ -1021,6 +1196,7 @@ class MoldWrapperMainWindow(QMainWindow):
         self.spin_end_ctrl_disp.setEnabled(deform_enabled)
         self.btn_reset_end_deform.setEnabled(deform_enabled)
         can_copy_end = enabled and has_mesh and self._end_pose_for_deform() is not None
+        self.spin_backend_grid.setEnabled(can_copy_end)
         self.btn_copy_backend.setEnabled(can_copy_end)
         self.chk_show_backend.setEnabled(
             enabled and self._copied_end_mesh is not None
@@ -1112,6 +1288,7 @@ class MoldWrapperMainWindow(QMainWindow):
 
         self._current_path = path
         self.lbl_file.setText(path.name)
+        self.setWindowTitle(f"3D Mold Wrapper — {path}")
         self._source_mesh = mesh.copy(deep=True)
         self._reset_model_rotation_controls(apply_mesh=False)
         self._show_repair_planes = False
@@ -1130,6 +1307,8 @@ class MoldWrapperMainWindow(QMainWindow):
         self._reset_all_planes()
         self._wrap_mesh = None
         self._wrap_back_mesh = None
+        self._clear_start_mesh = None
+        self._clear_back_mesh = None
         self._fill_gaps_mesh = None
         self._fill_gaps_path = None
         self._copied_end_mesh = None
@@ -1216,6 +1395,8 @@ class MoldWrapperMainWindow(QMainWindow):
         self._reset_all_planes()
         self._wrap_mesh = None
         self._wrap_back_mesh = None
+        self._clear_start_mesh = None
+        self._clear_back_mesh = None
         self._fill_gaps_mesh = None
         self._fill_gaps_path = None
         self._copied_end_mesh = None
@@ -1819,6 +2000,28 @@ class MoldWrapperMainWindow(QMainWindow):
                         edge_color="#74c7ec",
                     )
                 )
+            if self._clear_start_mesh is not None:
+                overlays.append(
+                    OverlayMesh(
+                        mesh=self._clear_start_mesh,
+                        color=_CLEAR_START_COLOR,
+                        opacity=0.9,
+                        style="surface",
+                        show_edges=True,
+                        edge_color="#e64553",
+                    )
+                )
+            if self._clear_back_mesh is not None:
+                overlays.append(
+                    OverlayMesh(
+                        mesh=self._clear_back_mesh,
+                        color=_CLEAR_BACK_COLOR,
+                        opacity=0.9,
+                        style="surface",
+                        show_edges=True,
+                        edge_color="#ea76cb",
+                    )
+                )
         if self._fill_gaps_mesh is not None:
             overlays.append(
                 OverlayMesh(
@@ -1875,6 +2078,18 @@ class MoldWrapperMainWindow(QMainWindow):
             self._refresh_plane_overlays()
         self.footer.show_message(f"Selected end control point {index + 1}")
 
+    def _update_backend_grid_label(self) -> None:
+        n = int(self._backend_grid_n)
+        total = n * n
+        self.lbl_backend_grid.setText(
+            f"{n} × {n} = {total:,} Backend sample points "
+            f"(max {_MAX_BACKEND_POINTS:,}). Used by Copy Backend Plane."
+        )
+
+    def _on_backend_grid_changed(self, value: int) -> None:
+        self._backend_grid_n = int(value)
+        self._update_backend_grid_label()
+
     def _build_curved_end_snapshot(self) -> BackendSnapshot | None:
         """Freeze the current deformed end plane as a Backend snapshot."""
         mesh = self.viewer.mesh
@@ -1882,6 +2097,7 @@ class MoldWrapperMainWindow(QMainWindow):
         if mesh is None or pose is None:
             return None
         half = plane_half_extent(mesh)
+        density = int(self._backend_grid_n)
         ctrl_uv = np.asarray(self._end_ctrl_uv, dtype=float).copy()
         ctrl_disp = np.asarray(self._end_ctrl_disp, dtype=float).copy()
         center, normal = pose_frame(
@@ -1898,6 +2114,7 @@ class MoldWrapperMainWindow(QMainWindow):
             half_extent=half,
             uv=ctrl_uv,
             displacements=ctrl_disp,
+            resolution=density,
         ).copy(deep=True)
         return BackendSnapshot(
             mesh=surface,
@@ -1910,10 +2127,36 @@ class MoldWrapperMainWindow(QMainWindow):
             half_extent=float(half),
             ctrl_uv=ctrl_uv,
             ctrl_disp=ctrl_disp,
+            density=density,
         )
 
     def _copy_curved_end_plane(self) -> None:
-        snapshot = self._build_curved_end_snapshot()
+        if self._end_pose_for_deform() is None or self.viewer.mesh is None:
+            QMessageBox.information(
+                self,
+                "Copy Backend Plane",
+                "Set the end plane position first, then copy its curved state.",
+            )
+            return
+
+        density = int(self._backend_grid_n)
+
+        def run_copy():
+            return self._build_curved_end_snapshot()
+
+        try:
+            snapshot = self._run_busy(
+                f"Copying Backend plane ({density} × {density})…",
+                run_copy,
+            )
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self,
+                "Copy Backend Error",
+                f"Could not copy Backend plane:\n{exc}",
+            )
+            return
+
         if snapshot is None:
             QMessageBox.information(
                 self,
@@ -1921,13 +2164,17 @@ class MoldWrapperMainWindow(QMainWindow):
                 "Set the end plane position first, then copy its curved state.",
             )
             return
+
         self._backend_snapshot = snapshot
         self._copied_end_mesh = snapshot.mesh
         self.chk_show_backend.setEnabled(True)
         self.chk_show_backend.setChecked(True)
         self._refresh_plane_overlays()
         self._set_controls_enabled(True)
-        self.footer.show_message("Copied backend plane at current curved end position")
+        n = snapshot.density
+        self.footer.show_message(
+            f"Copied backend plane at {n} × {n} = {n * n:,} grid density"
+        )
 
     def _on_show_copied_end_toggled(self, _checked: bool) -> None:
         self._refresh_plane_overlays()
@@ -2325,16 +2572,181 @@ class MoldWrapperMainWindow(QMainWindow):
         self._refresh_plane_overlays()
         self._set_controls_enabled(True)
 
+        backend_n = int(backend.density)
         QMessageBox.information(
             self,
             "Wrap Back Complete",
             f"Extruded Back-start points toward Backend with {result.point_count:,} "
             f"samples ({result.density} × {result.density}).\n\n"
+            f"Backend stop grid: {backend_n} × {backend_n}\n"
             f"Hit model: {result.hit_model_count:,}\n"
             f"Stopped at Backend plane: {result.hit_end_count:,}\n\n"
             f"Saved to:\n{result.output_path}",
         )
         self.footer.show_message(f"Wrap back saved → {result.output_path.name}")
+
+    def _clear_start_to_end(self) -> None:
+        if self._current_path is None or self.viewer.mesh is None:
+            return
+
+        if not self._planes_ready():
+            QMessageBox.warning(
+                self,
+                "Planes Required",
+                "Confirm both the start plane and the end plane before clearing.",
+            )
+            return
+
+        start = self._start.confirmed
+        end = self._end.confirmed
+        assert start.is_complete and end.is_complete
+
+        model_mesh = self.viewer.mesh
+        output_dir = output_dir_for_stl(self._current_path)
+        progress = self._progress_callback()
+        padding_mm = float(self.spin_clear_start_padding.value())
+
+        start_origin = plane_origin(
+            model_mesh,
+            start.z,  # type: ignore[arg-type]
+            x=start.x,
+            y=start.y,
+        )
+        end_origin = plane_origin(
+            model_mesh,
+            end.z,  # type: ignore[arg-type]
+            x=end.x,
+            y=end.y,
+        )
+        end_ctrl_uv = np.asarray(self._end_ctrl_uv, dtype=float).copy()
+        end_ctrl_disp = np.asarray(self._end_ctrl_disp, dtype=float).copy()
+
+        def run_clear():
+            return clear_start_to_end(
+                model_mesh,
+                output_dir,
+                start_origin=start_origin,
+                start_rx_deg=start.rx,
+                start_ry_deg=start.ry,
+                start_rz_deg=start.rz,
+                end_origin=end_origin,
+                end_rx_deg=end.rx,
+                end_ry_deg=end.ry,
+                end_rz_deg=end.rz,
+                density=self.spin_point_density.value(),
+                end_ctrl_uv=end_ctrl_uv,
+                end_ctrl_disp=end_ctrl_disp,
+                padding_mm=padding_mm,
+                progress=progress,
+            )
+
+        try:
+            result = self._run_busy("Clearing Start → End…", run_clear)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self,
+                "Clear Extra Error",
+                f"Clear Start to End failed:\n{exc}",
+            )
+            return
+
+        self._clear_start_mesh = result.clear_mesh
+        self._refresh_plane_overlays()
+        self._set_controls_enabled(True)
+
+        QMessageBox.information(
+            self,
+            "Clear Start to End Complete",
+            f"Cleared extra material with {result.point_count:,} samples "
+            f"({result.density} × {result.density}).\n\n"
+            f"Padding: {result.padding_mm:.2f} mm\n"
+            f"Kept near model: {result.kept_count:,}\n"
+            f"Cleared columns: {result.cleared_count:,}\n\n"
+            f"Saved to:\n{result.output_path}",
+        )
+        self.footer.show_message(
+            f"Cleared Start→End saved → {result.output_path.name}"
+        )
+
+    def _clear_back_to_backend(self) -> None:
+        if self._current_path is None or self.viewer.mesh is None:
+            return
+
+        back_pose = self._back_start_pose()
+        backend = self._backend_snapshot
+        if back_pose is None or backend is None:
+            QMessageBox.warning(
+                self,
+                "Clear Back Required",
+                "Copy a Backend plane and set the Back-start plane before clearing.",
+            )
+            return
+
+        model_mesh = self.viewer.mesh
+        output_dir = output_dir_for_stl(self._current_path)
+        progress = self._progress_callback()
+        padding_mm = float(self.spin_clear_back_padding.value())
+
+        start_origin = plane_origin(
+            model_mesh,
+            float(back_pose.z),
+            x=back_pose.x,
+            y=back_pose.y,
+        )
+        backend_origin = (backend.x, backend.y, backend.z)
+        density = int(self._back_start_grid_n)
+        ctrl_uv = np.asarray(backend.ctrl_uv, dtype=float).copy()
+        ctrl_disp = np.asarray(backend.ctrl_disp, dtype=float).copy()
+        backend_mesh = backend.mesh
+
+        def run_clear():
+            return clear_back_start_to_backend(
+                model_mesh,
+                output_dir,
+                back_start_origin=start_origin,
+                back_start_rx_deg=back_pose.rx,
+                back_start_ry_deg=back_pose.ry,
+                back_start_rz_deg=back_pose.rz,
+                backend_origin=backend_origin,
+                backend_rx_deg=backend.rx,
+                backend_ry_deg=backend.ry,
+                backend_rz_deg=backend.rz,
+                backend_ctrl_uv=ctrl_uv,
+                backend_ctrl_disp=ctrl_disp,
+                backend_mesh=backend_mesh,
+                half_extent=backend.half_extent,
+                density=density,
+                padding_mm=padding_mm,
+                progress=progress,
+            )
+
+        try:
+            result = self._run_busy("Clearing Back-start → Backend…", run_clear)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self,
+                "Clear Extra Error",
+                f"Clear Back-start to Backend failed:\n{exc}",
+            )
+            return
+
+        self._clear_back_mesh = result.clear_mesh
+        self._refresh_plane_overlays()
+        self._set_controls_enabled(True)
+
+        QMessageBox.information(
+            self,
+            "Clear Back-start to Backend Complete",
+            f"Cleared extra material with {result.point_count:,} samples "
+            f"({result.density} × {result.density}).\n\n"
+            f"Padding: {result.padding_mm:.2f} mm\n"
+            f"Kept near model: {result.kept_count:,}\n"
+            f"Cleared columns: {result.cleared_count:,}\n\n"
+            f"Saved to:\n{result.output_path}",
+        )
+        self.footer.show_message(
+            f"Cleared Back→Backend saved → {result.output_path.name}"
+        )
 
 
 def create_mold_wrapper_app(argv: list[str] | None = None) -> QApplication:

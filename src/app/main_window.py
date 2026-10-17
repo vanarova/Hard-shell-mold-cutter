@@ -781,14 +781,16 @@ def apply_stylesheet(app: QApplication) -> None:
         QProgressBar#footerProgress {
             background-color: #1e1e2e;
             border: 1px solid #45475a;
-            border-radius: 4px;
+            border-radius: 3px;
             color: #cdd6f4;
             text-align: center;
-            min-height: 14px;
+            min-height: 8px;
+            max-height: 10px;
+            font-size: 10px;
         }
         QProgressBar#footerProgress::chunk {
             background-color: #89b4fa;
-            border-radius: 3px;
+            border-radius: 2px;
         }
         QComboBox#footerViewMode {
             background-color: #1e1e2e;
