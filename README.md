@@ -6,7 +6,8 @@ Desktop tools for STL viewing and hard-shell mold workflows: layered slicing, 2.
 
 | Launcher | Entry point | Purpose |
 | --- | --- | --- |
-| `Launch_3D_Mold_Wrapper.bat` | `src/main_3d_mold_wrapper.py` | Start/end oriented planes, end-plane deform, Backend / Back-start planes, Wrap Plane and Wrap Back |
+| `Launch_3D_Mold_Wrapper.bat` / `Launch_3D_Rigid_Mold_Maker.bat` | `src/main_3d_mold_wrapper.py` | Start/end oriented planes, end-plane deform, Backend / Back-start planes, Wrap Plane and Wrap Back |
+| `Launch_Curve_Slicer.bat` | `src/main_curve_slicer.py` | One curved plane with points grid (≤200); confirm → slice model into two STLs |
 | `launch_25D-MoldMaker.bat` | `src/main_25d_moldmaker.py` | 2.5D mold maker workflow |
 | `launch.bat` | `src/main.py` | Classic STL viewer and Z-slice / boundary / mold-negative pipeline |
 
@@ -66,6 +67,18 @@ launch.bat
 Use **Help — Workflow…** in the sidebar for step-by-step Model Fix and Wrap diagrams.
 
 Outputs are written next to the model STL in a folder named after the file (for example `wrap_plane.stl`, `wrap_back_plane.stl`).
+
+## Curve Slicer
+
+```bat
+Launch_Curve_Slicer.bat
+```
+
+1. Open an STL — the cutting plane auto-sizes to the model XY footprint and auto-rotates so its long side is perpendicular to the model’s long side.
+2. Adjust **Size margin (%)** (default 10%; negative shrinks below the model footprint) and **Knife thickness** (only near-plane geometry is cut; `0` = through-cut under the plane).
+3. Select points and pull/push to curve the cutting surface.
+4. **Confirm Grid & Points**, then **Slice Model**.
+5. Saves `curve_slice_part_a.stl` and `curve_slice_part_b.stl` in the working folder named after the STL.
 
 ## Classic Mold Liner (brief)
 

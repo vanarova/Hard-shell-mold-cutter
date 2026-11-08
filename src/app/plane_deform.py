@@ -75,21 +75,44 @@ def place_nxn_uv(n_per_side: int) -> np.ndarray:
     return np.stack([uu.ravel(), vv.ravel()], axis=1)
 
 
+def _resolve_half_extents(
+    half_extent: float | None,
+    half_extent_i: float | None,
+    half_extent_j: float | None,
+) -> tuple[float, float]:
+    """Return (half_i, half_j); square when only ``half_extent`` is given."""
+    if half_extent_i is not None and half_extent_j is not None:
+        return max(float(half_extent_i), 1e-6), max(float(half_extent_j), 1e-6)
+    if half_extent is None:
+        raise ValueError("Provide half_extent or both half_extent_i and half_extent_j.")
+    half = max(float(half_extent), 1e-6)
+    return half, half
+
+
 def control_points_world(
     *,
     center: np.ndarray,
     normal: np.ndarray,
-    half_extent: float,
+    half_extent: float | None = None,
     uv: np.ndarray,
     displacements: np.ndarray,
+    half_extent_i: float | None = None,
+    half_extent_j: float | None = None,
+    i_axis: np.ndarray | None = None,
+    j_axis: np.ndarray | None = None,
 ) -> np.ndarray:
     """Return deformed control-point positions in world space, shape (n, 3)."""
-    i_axis, j_axis = _plane_basis(normal)
+    if i_axis is None or j_axis is None:
+        i_axis, j_axis = _plane_basis(normal)
+    else:
+        i_axis = _normalize(np.asarray(i_axis, dtype=float))
+        j_axis = _normalize(np.asarray(j_axis, dtype=float))
     n = _normalize(normal)
+    half_i, half_j = _resolve_half_extents(half_extent, half_extent_i, half_extent_j)
     rest = (
         center[None, :]
-        + (uv[:, 0:1] * half_extent) * i_axis[None, :]
-        + (uv[:, 1:2] * half_extent) * j_axis[None, :]
+        + (uv[:, 0:1] * half_i) * i_axis[None, :]
+        + (uv[:, 1:2] * half_j) * j_axis[None, :]
     )
     return rest + displacements[:, None] * n[None, :]
 
@@ -98,26 +121,36 @@ def sample_deformed_plane_grid(
     *,
     center: np.ndarray,
     normal: np.ndarray,
-    half_extent: float,
+    half_extent: float | None = None,
     uv: np.ndarray,
     displacements: np.ndarray,
     density: int,
+    half_extent_i: float | None = None,
+    half_extent_j: float | None = None,
+    i_axis: np.ndarray | None = None,
+    j_axis: np.ndarray | None = None,
 ) -> np.ndarray:
     """
     Sample the deformed plane on a regular parametric grid.
 
     Returns points with shape (density, density, 3), matching wrap start-grid UVs.
+    Optional ``half_extent_i`` / ``half_extent_j`` make a rectangular plane.
     """
-    i_axis, j_axis = _plane_basis(normal)
+    if i_axis is None or j_axis is None:
+        i_axis, j_axis = _plane_basis(normal)
+    else:
+        i_axis = _normalize(np.asarray(i_axis, dtype=float))
+        j_axis = _normalize(np.asarray(j_axis, dtype=float))
     n = _normalize(normal)
+    half_i, half_j = _resolve_half_extents(half_extent, half_extent_i, half_extent_j)
     res = max(2, int(density))
     u = np.linspace(-1.0, 1.0, res)
     v = np.linspace(-1.0, 1.0, res)
     uu, vv = np.meshgrid(u, v, indexing="xy")
     rest = (
         center[None, None, :]
-        + (uu[:, :, None] * half_extent) * i_axis[None, None, :]
-        + (vv[:, :, None] * half_extent) * j_axis[None, None, :]
+        + (uu[:, :, None] * half_i) * i_axis[None, None, :]
+        + (vv[:, :, None] * half_j) * j_axis[None, None, :]
     )
 
     query = np.stack([uu.ravel(), vv.ravel()], axis=1)
@@ -145,10 +178,14 @@ def make_deformed_plane_mesh(
     *,
     center: np.ndarray,
     normal: np.ndarray,
-    half_extent: float,
+    half_extent: float | None = None,
     uv: np.ndarray,
     displacements: np.ndarray,
     resolution: int = _DISPLAY_RESOLUTION,
+    half_extent_i: float | None = None,
+    half_extent_j: float | None = None,
+    i_axis: np.ndarray | None = None,
+    j_axis: np.ndarray | None = None,
 ) -> pv.PolyData:
     """
     Build a dense plane mesh deformed by IDW of control-point pull/push amounts.
@@ -162,6 +199,10 @@ def make_deformed_plane_mesh(
         uv=uv,
         displacements=displacements,
         density=resolution,
+        half_extent_i=half_extent_i,
+        half_extent_j=half_extent_j,
+        i_axis=i_axis,
+        j_axis=j_axis,
     )
     grid = pv.StructuredGrid(pts[:, :, 0], pts[:, :, 1], pts[:, :, 2])
     return grid.extract_surface(algorithm="dataset_surface").triangulate()
@@ -207,6 +248,52 @@ def point_cloud_glyphs(points: np.ndarray, *, radius: float) -> pv.PolyData | No
     return cloud.glyph(geom=sphere, scale=False, orient=False)
 
 
+def _rotate_vector_xyz(
+    vector: np.ndarray,
+    *,
+    rx_deg: float,
+    ry_deg: float,
+    rz_deg: float,
+) -> np.ndarray:
+    """Apply Rx → Ry → Rz to a vector (same order as oriented plane meshes)."""
+    v = np.asarray(vector, dtype=float).reshape(3)
+    rx = math.radians(rx_deg)
+    ry = math.radians(ry_deg)
+    rz = math.radians(rz_deg)
+    # Rx
+    x, y, z = float(v[0]), float(v[1]), float(v[2])
+    cos_x, sin_x = math.cos(rx), math.sin(rx)
+    y, z = y * cos_x - z * sin_x, y * sin_x + z * cos_x
+    # Ry
+    cos_y, sin_y = math.cos(ry), math.sin(ry)
+    x, z = x * cos_y + z * sin_y, -x * sin_y + z * cos_y
+    # Rz
+    cos_z, sin_z = math.cos(rz), math.sin(rz)
+    x, y = x * cos_z - y * sin_z, x * sin_z + y * cos_z
+    return _normalize(np.array([x, y, z], dtype=float))
+
+
+def oriented_plane_axes(
+    *,
+    rx: float,
+    ry: float,
+    rz: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Return (i_axis, j_axis, normal) for Rx/Ry/Rz.
+
+    Matches ``pv.Plane`` defaults (i=+X, j=+Y, n=+Z) after the same rotations
+    used by ``make_oriented_plane_mesh``.
+    """
+    i_axis = _rotate_vector_xyz(np.array([1.0, 0.0, 0.0]), rx_deg=rx, ry_deg=ry, rz_deg=rz)
+    j_axis = _rotate_vector_xyz(np.array([0.0, 1.0, 0.0]), rx_deg=rx, ry_deg=ry, rz_deg=rz)
+    normal = _rotate_vector_xyz(np.array([0.0, 0.0, 1.0]), rx_deg=rx, ry_deg=ry, rz_deg=rz)
+    # Re-orthogonalize j against n and i for numerical stability.
+    j_axis = _normalize(np.cross(normal, i_axis))
+    i_axis = _normalize(np.cross(j_axis, normal))
+    return i_axis, j_axis, normal
+
+
 def pose_frame(
     *,
     x: float,
@@ -218,5 +305,5 @@ def pose_frame(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return center and unit normal for a plane pose."""
     center = np.asarray((x, y, z), dtype=float)
-    normal = np.asarray(plane_normal_from_rotations(rx, ry, rz), dtype=float)
+    _i, _j, normal = oriented_plane_axes(rx=rx, ry=ry, rz=rz)
     return center, _normalize(normal)
