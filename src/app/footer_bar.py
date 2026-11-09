@@ -65,9 +65,9 @@ class FooterBar(QFrame):
         self.progress.setObjectName("footerProgress")
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
-        self.progress.setTextVisible(False)
-        self.progress.setFixedHeight(8)
-        self.progress.setFormat("%p%")
+        self.progress.setTextVisible(True)
+        self.progress.setFixedHeight(18)
+        self.progress.setFormat("%v / %m")
         status_column.addWidget(self.progress)
 
         root.addLayout(status_column, stretch=1)
@@ -179,10 +179,13 @@ class FooterBar(QFrame):
         self.lbl_stage.setText(message)
         if total > 0:
             self.progress.setRange(0, total)
-            clamped = min(max(step, 0), total)
+            clamped = min(max(int(step), 0), int(total))
             self.progress.setValue(clamped)
-            percent = int((clamped / total) * 100)
-            self.progress.setFormat(f"{percent}% — {message}")
+            pending = max(int(total) - clamped, 0)
+            percent = int((clamped / total) * 100) if total else 0
+            self.progress.setFormat(
+                f"{clamped:,} / {total:,}  ({percent}% · {pending:,} pending)"
+            )
         elif self._busy:
             self.progress.setRange(0, 0)
             self.progress.setFormat(message or "Working…")

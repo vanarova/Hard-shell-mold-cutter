@@ -208,9 +208,9 @@ class CurveSlicerMainWindow(QMainWindow):
         self.btn_slice = QPushButton("Slice Model")
         self.btn_slice.setEnabled(False)
         self.btn_slice.setToolTip(
-            "Knife-cut with the confirmed plane: only where the blade touches "
-            "the model (inside the plane rectangle and knife thickness). "
-            "Points far from the plane are not cut. Saves part A and part B."
+            "Cut the model only where it intersects the deformed plane, open "
+            "both halves, cap each open side with the same curved plane patch, "
+            "and weld the shared boundary so the parts mate."
         )
         self.btn_slice.clicked.connect(self._slice)
         layout.addWidget(self.btn_slice)
@@ -269,9 +269,8 @@ class CurveSlicerMainWindow(QMainWindow):
         layout.addWidget(self.lbl_plane_size)
 
         knife_info = QLabel(
-            "Knife cut: only geometry near the plane is sliced. Points far "
-            "from the plane along its normal are left uncut. "
-            "0 mm = cut all the way through under the plane."
+            "Cut uses the plane∩model intersection only. Both opens are capped "
+            "with the same deformed-plane patch and welded on the shared rim."
         )
         knife_info.setWordWrap(True)
         knife_info.setObjectName("fileLabel")
@@ -290,9 +289,8 @@ class CurveSlicerMainWindow(QMainWindow):
         self.spin_knife_thickness.setMinimumWidth(96)
         self.spin_knife_thickness.setEnabled(False)
         self.spin_knife_thickness.setToolTip(
-            "Band around the plane where the knife cuts. "
-            "Small values only sever near the plane; far points stay uncut. "
-            "0 = cut through the full depth under the plane rectangle."
+            "Reserved. The split is a through-cut on the plane∩model footprint; "
+            "both halves are capped with the same curved patch."
         )
         knife_row.addWidget(self.spin_knife_thickness)
         layout.addLayout(knife_row)
@@ -954,7 +952,8 @@ class CurveSlicerMainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Slice Complete",
-            f"Cut into two parts with {result.point_count} grid points.\n\n"
+            f"Cut on plane∩model, capped both opens with the same curved "
+            f"patch, welded the shared rim ({result.point_count} grid points).\n\n"
             f"Part A ({result.part_a.n_cells:,} tris):\n{result.path_a}\n\n"
             f"Part B ({result.part_b.n_cells:,} tris):\n{result.path_b}",
         )

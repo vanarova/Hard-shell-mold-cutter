@@ -75,10 +75,11 @@ Launch_Curve_Slicer.bat
 ```
 
 1. Open an STL — the cutting plane auto-sizes to the model XY footprint and auto-rotates so its long side is perpendicular to the model’s long side.
-2. Adjust **Size margin (%)** (default 10%; negative shrinks below the model footprint) and **Knife thickness** (only near-plane geometry is cut; `0` = through-cut under the plane).
+2. Adjust **Size margin (%)** (default 10%; negative shrinks below the model footprint).
 3. Select points and pull/push to curve the cutting surface.
 4. **Confirm Grid & Points**, then **Slice Model**.
-5. Saves `curve_slice_part_a.stl` and `curve_slice_part_b.stl` in the working folder named after the STL.
+5. Cut only on the plane∩model intersection, open both halves, cap each open side with the **same** deformed-plane patch, and weld the shared boundary so the parts mate.
+6. Saves `curve_slice_part_a.stl` and `curve_slice_part_b.stl` in the working folder named after the STL.
 
 ## Classic Mold Liner (brief)
 

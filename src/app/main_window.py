@@ -784,9 +784,9 @@ def apply_stylesheet(app: QApplication) -> None:
             border-radius: 3px;
             color: #cdd6f4;
             text-align: center;
-            min-height: 8px;
-            max-height: 10px;
-            font-size: 10px;
+            min-height: 16px;
+            max-height: 20px;
+            font-size: 11px;
         }
         QProgressBar#footerProgress::chunk {
             background-color: #89b4fa;
