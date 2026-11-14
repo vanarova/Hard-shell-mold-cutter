@@ -78,7 +78,7 @@ Launch_Curve_Slicer.bat
 2. Adjust **Size margin (%)** (default 10%; negative shrinks below the model footprint).
 3. Select points and pull/push to curve the cutting surface.
 4. **Confirm Grid & Points**, then **Slice Model**.
-5. Cut only on the plane∩model intersection, open both halves, cap each open side with the **same** deformed-plane patch, and weld the shared boundary so the parts mate.
+5. Cut only where the deformed plane crosses the mesh surface (no ray/vertical column cut), open both halves, and leave the cut open (rim snapped to the plane; no cap or weld).
 6. Saves `curve_slice_part_a.stl` and `curve_slice_part_b.stl` in the working folder named after the STL.
 
 ## Classic Mold Liner (brief)

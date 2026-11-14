@@ -208,9 +208,8 @@ class CurveSlicerMainWindow(QMainWindow):
         self.btn_slice = QPushButton("Slice Model")
         self.btn_slice.setEnabled(False)
         self.btn_slice.setToolTip(
-            "Cut the model only where it intersects the deformed plane, open "
-            "both halves, cap each open side with the same curved plane patch, "
-            "and weld the shared boundary so the parts mate."
+            "Cut only where the deformed plane crosses the mesh surface and "
+            "save two open halves (no ray column cut; rim snapped to the plane)."
         )
         self.btn_slice.clicked.connect(self._slice)
         layout.addWidget(self.btn_slice)
@@ -269,8 +268,8 @@ class CurveSlicerMainWindow(QMainWindow):
         layout.addWidget(self.lbl_plane_size)
 
         knife_info = QLabel(
-            "Cut uses the plane∩model intersection only. Both opens are capped "
-            "with the same deformed-plane patch and welded on the shared rim."
+            "Cut follows the plane only where it crosses the mesh surface "
+            "(no ray column through-cut). Both halves stay open at the cut."
         )
         knife_info.setWordWrap(True)
         knife_info.setObjectName("fileLabel")
@@ -289,8 +288,8 @@ class CurveSlicerMainWindow(QMainWindow):
         self.spin_knife_thickness.setMinimumWidth(96)
         self.spin_knife_thickness.setEnabled(False)
         self.spin_knife_thickness.setToolTip(
-            "Reserved. The split is a through-cut on the plane∩model footprint; "
-            "both halves are capped with the same curved patch."
+            "Reserved. The split follows the plane∩mesh surface only; "
+            "both halves are left open at the cut."
         )
         knife_row.addWidget(self.spin_knife_thickness)
         layout.addLayout(knife_row)
@@ -952,8 +951,8 @@ class CurveSlicerMainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Slice Complete",
-            f"Cut on plane∩model, capped both opens with the same curved "
-            f"patch, welded the shared rim ({result.point_count} grid points).\n\n"
+            f"Cut on plane∩mesh surface; both halves left open "
+            f"({result.point_count} grid points).\n\n"
             f"Part A ({result.part_a.n_cells:,} tris):\n{result.path_a}\n\n"
             f"Part B ({result.part_b.n_cells:,} tris):\n{result.path_b}",
         )

@@ -14,11 +14,7 @@ from scipy.spatial import Delaunay
 from shapely.geometry import Point, Polygon
 
 from app.mesh_ops import polydata_to_trimesh, trimesh_to_polydata
-from app.plane_deform import (
-    oriented_plane_axes,
-    pose_frame,
-    sample_deformed_plane_grid,
-)
+from app.plane_deform import oriented_plane_axes, pose_frame
 
 ProgressCallback = Callable[[str, int, int], None]
 
@@ -29,7 +25,7 @@ DEFAULT_SIZE_MARGIN_PERCENT = 10.0
 MIN_SIZE_MARGIN_PERCENT = -99.0
 MAX_SIZE_MARGIN_PERCENT = 500.0
 _MIN_SIZE_SCALE = 0.01
-# Reserved for UI compatibility (split is a through-cut on the plane footprint).
+# Reserved for UI compatibility (slice is a surface cut along plane∩mesh).
 DEFAULT_KNIFE_THICKNESS_MM = 0.0
 MIN_KNIFE_THICKNESS_MM = 0.0
 MAX_KNIFE_THICKNESS_MM = 1_000_000.0
@@ -40,6 +36,7 @@ _IDW_POWER = 2.0
 _IDW_EPS = 1e-8
 _UV_BOUNDS_EPS = 1e-6
 _UNCUT_SCALAR = 1.0
+_CUT_SIGN_EPS = 1e-9
 # Alias kept for older call sites / UI naming.
 DEFAULT_RAY_DENSITY = DEFAULT_PATCH_DENSITY
 MIN_RAY_DENSITY = MIN_PATCH_DENSITY
@@ -280,6 +277,159 @@ def _cut_scalars(
     surf_h = _idw_displacements(query, ctrl_uv, ctrl_disp)
     scalar[np.flatnonzero(inside_uv)] = height[inside_uv] - surf_h
     return scalar
+
+
+def _vertex_plane_uv(
+    points: np.ndarray,
+    *,
+    center: np.ndarray,
+    i_axis: np.ndarray,
+    j_axis: np.ndarray,
+    half_i: float,
+    half_j: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    rel = np.asarray(points, dtype=float) - np.asarray(center, dtype=float)
+    u = (rel @ i_axis) / max(float(half_i), 1e-9)
+    v = (rel @ j_axis) / max(float(half_j), 1e-9)
+    return u, v
+
+
+def _face_touches_plane_footprint(
+    u: np.ndarray,
+    v: np.ndarray,
+    face: np.ndarray,
+) -> bool:
+    fu = u[np.asarray(face, dtype=np.int64)]
+    fv = v[np.asarray(face, dtype=np.int64)]
+    in_u = (fu >= -1.0 - _UV_BOUNDS_EPS) & (fu <= 1.0 + _UV_BOUNDS_EPS)
+    in_v = (fv >= -1.0 - _UV_BOUNDS_EPS) & (fv <= 1.0 + _UV_BOUNDS_EPS)
+    return bool(np.any(in_u & in_v))
+
+
+def _face_side_class(d_face: np.ndarray) -> str:
+    """Return ``a``, ``b``, or ``cut`` (crosses or lies on the deformed plane)."""
+    d = np.asarray(d_face, dtype=float)
+    pos = d > _CUT_SIGN_EPS
+    neg = d < -_CUT_SIGN_EPS
+    if np.all(pos):
+        return "a"
+    if np.all(neg):
+        return "b"
+    if np.any(pos) and np.any(neg):
+        return "cut"
+    return "cut"
+
+
+def _mesh_crosses_deformed_plane(
+    tm: trimesh.Trimesh,
+    *,
+    center: np.ndarray,
+    i_axis: np.ndarray,
+    j_axis: np.ndarray,
+    normal: np.ndarray,
+    half_i: float,
+    half_j: float,
+    ctrl_uv: np.ndarray,
+    ctrl_disp: np.ndarray,
+) -> bool:
+    pts = np.asarray(tm.vertices, dtype=float)
+    d = _signed_heights(
+        pts,
+        center=center,
+        i_axis=i_axis,
+        j_axis=j_axis,
+        normal=normal,
+        half_i=half_i,
+        half_j=half_j,
+        ctrl_uv=ctrl_uv,
+        ctrl_disp=ctrl_disp,
+    )
+    u, v = _vertex_plane_uv(
+        pts, center=center, i_axis=i_axis, j_axis=j_axis, half_i=half_i, half_j=half_j
+    )
+    for face in np.asarray(tm.faces, dtype=np.int64):
+        if not _face_touches_plane_footprint(u, v, face):
+            continue
+        df = d[face]
+        if float(df.min()) <= _CUT_SIGN_EPS and float(df.max()) >= -_CUT_SIGN_EPS:
+            return True
+    return False
+
+
+def _split_open_at_deformed_plane(
+    model_mesh: pv.PolyData,
+    *,
+    center: np.ndarray,
+    i_axis: np.ndarray,
+    j_axis: np.ndarray,
+    normal: np.ndarray,
+    half_i: float,
+    half_j: float,
+    ctrl_uv: np.ndarray,
+    ctrl_disp: np.ndarray,
+) -> tuple[pv.PolyData, pv.PolyData]:
+    """
+    Split the mesh at the deformed plane surface only (no ray/UV column through-cut).
+
+    Triangles that cross the plane within the plane footprint are removed so the
+    cut stays open; other faces are assigned by which side of the plane they lie on.
+    """
+    tm = polydata_to_trimesh(model_mesh)
+    pts = np.asarray(tm.vertices, dtype=float)
+    d = _signed_heights(
+        pts,
+        center=center,
+        i_axis=i_axis,
+        j_axis=j_axis,
+        normal=normal,
+        half_i=half_i,
+        half_j=half_j,
+        ctrl_uv=ctrl_uv,
+        ctrl_disp=ctrl_disp,
+    )
+    u, v = _vertex_plane_uv(
+        pts, center=center, i_axis=i_axis, j_axis=j_axis, half_i=half_i, half_j=half_j
+    )
+    faces_a: list[np.ndarray] = []
+    faces_b: list[np.ndarray] = []
+    for face in np.asarray(tm.faces, dtype=np.int64):
+        df = d[face]
+        if _face_touches_plane_footprint(u, v, face):
+            side = _face_side_class(df)
+            if side == "cut":
+                continue
+            if side == "a":
+                faces_a.append(face)
+            else:
+                faces_b.append(face)
+            continue
+        centroid_d = float(np.mean(df))
+        if centroid_d >= 0.0:
+            faces_a.append(face)
+        else:
+            faces_b.append(face)
+
+    if not faces_a or not faces_b:
+        raise ValueError(
+            "Cut left one side empty. Move the plane so it crosses the model "
+            "surface within the plane footprint."
+        )
+
+    part_a = trimesh.Trimesh(
+        vertices=pts,
+        faces=np.asarray(faces_a, dtype=np.int64),
+        process=False,
+    )
+    part_b = trimesh.Trimesh(
+        vertices=pts,
+        faces=np.asarray(faces_b, dtype=np.int64),
+        process=False,
+    )
+    part_a.remove_unreferenced_vertices()
+    part_b.remove_unreferenced_vertices()
+    return _as_surface(trimesh_to_polydata(part_a)), _as_surface(
+        trimesh_to_polydata(part_b)
+    )
 
 
 def _as_surface(mesh: pv.PolyData) -> pv.PolyData:
@@ -603,14 +753,14 @@ def slice_mesh_by_curve_plane(
     progress: ProgressCallback | None = None,
 ) -> CurveSliceResult:
     """
-    Cut the model on the plane∩model intersection, then cap both opens.
+    Cut the model only where the deformed plane crosses the mesh surface.
 
-    1. Sample the deformed plane; keep only samples inside the model.
-    2. Split/open the original mesh along the deformed plane (intersection only).
-    3. Cap each open side with the same patterned interior points and weld
-       on the shared open boundary.
+    1. Verify the plane crosses the model within the plane footprint.
+    2. Remove crossing triangles and assign the rest to each side (open cut).
+    3. Snap the open cut rim onto the deformed plane (no capping or welding).
     """
     _ = knife_thickness_mm
+    _ = ray_density
     ctrl_uv = np.asarray(ctrl_uv, dtype=float)
     ctrl_disp = np.asarray(ctrl_disp, dtype=float)
     if len(ctrl_uv) == 0:
@@ -620,15 +770,9 @@ def slice_mesh_by_curve_plane(
     if len(ctrl_uv) > MAX_GRID_POINTS:
         raise ValueError(f"Grid points must be at most {MAX_GRID_POINTS}.")
 
-    density = int(ray_density)
-    if density < MIN_PATCH_DENSITY or density > MAX_PATCH_DENSITY:
-        raise ValueError(
-            f"Patch density must be between {MIN_PATCH_DENSITY} and {MAX_PATCH_DENSITY}."
-        )
-
-    total_steps = 7
+    total_steps = 5
     if progress:
-        progress("Preparing plane-cut + patterned cap", 0, total_steps)
+        progress("Preparing surface plane-cut", 0, total_steps)
 
     if half_extent_i is None or half_extent_j is None:
         half_extent_i, half_extent_j = curve_plane_half_extents(
@@ -653,57 +797,11 @@ def slice_mesh_by_curve_plane(
         rx=float(rx_deg), ry=float(ry_deg), rz=float(rz_deg)
     )
 
+    tm_check = polydata_to_trimesh(model_mesh)
     if progress:
-        progress(
-            f"Sampling deformed plane · {density}×{density} = {density * density:,}",
-            1,
-            total_steps,
-        )
-
-    plane_grid = sample_deformed_plane_grid(
-        center=center,
-        normal=normal,
-        uv=ctrl_uv,
-        displacements=ctrl_disp,
-        density=density,
-        half_extent_i=half_i,
-        half_extent_j=half_j,
-        i_axis=i_axis,
-        j_axis=j_axis,
-    )
-    flat = plane_grid.reshape(-1, 3)
-
-    if progress:
-        progress("Finding plane∩model intersection samples", 2, total_steps)
-
-    active = _plane_model_intersection_mask(flat, model_mesh).reshape(density, density)
-    if not np.any(active):
-        raise ValueError(
-            "Plane does not intersect the model interior. Move the plane so it "
-            "crosses the solid."
-        )
-    active = _dilate_bool_grid(active, rings=1)
-    n_active = int(np.count_nonzero(active))
-    interior_xyz, interior_uv = _shared_interior_points(plane_grid, active)
-    if progress:
-        progress(
-            f"Intersection samples: {n_active:,} / {density * density:,} · "
-            f"shared pattern points: {len(interior_xyz):,}",
-            3,
-            total_steps,
-        )
-    if len(interior_xyz) == 0:
-        raise ValueError(
-            "No shared pattern points on the plane∩model intersection."
-        )
-
-    if progress:
-        progress("Cutting / opening model along plane intersection", 4, total_steps)
-
-    work = model_mesh.copy(deep=True)
-    work.clear_data()
-    work["cut_side"] = _cut_scalars(
-        np.asarray(work.points, dtype=float),
+        progress("Checking plane∩mesh surface crossing", 1, total_steps)
+    if not _mesh_crosses_deformed_plane(
+        tm_check,
         center=center,
         i_axis=i_axis,
         j_axis=j_axis,
@@ -712,20 +810,29 @@ def slice_mesh_by_curve_plane(
         half_j=half_j,
         ctrl_uv=ctrl_uv,
         ctrl_disp=ctrl_disp,
-        cut_uv_mask=active,
-    )
-    part_a_raw = work.clip_scalar(scalars="cut_side", value=0.0, invert=False)
-    part_b_raw = work.clip_scalar(scalars="cut_side", value=0.0, invert=True)
-    if part_a_raw.n_cells == 0 or part_b_raw.n_cells == 0:
+    ):
         raise ValueError(
-            "Cut left one side empty. Move the plane so it intersects more of "
-            "the model."
+            "Plane does not cross the model surface. Move the plane so it "
+            "intersects the mesh within the plane footprint."
         )
-    part_a = _as_surface(part_a_raw)
-    part_b = _as_surface(part_b_raw)
 
     if progress:
-        progress("Snapping open cuts onto deformed plane", 5, total_steps)
+        progress("Cutting along plane∩mesh surface", 2, total_steps)
+
+    part_a, part_b = _split_open_at_deformed_plane(
+        model_mesh,
+        center=center,
+        i_axis=i_axis,
+        j_axis=j_axis,
+        normal=normal,
+        half_i=half_i,
+        half_j=half_j,
+        ctrl_uv=ctrl_uv,
+        ctrl_disp=ctrl_disp,
+    )
+
+    if progress:
+        progress("Snapping open cuts onto deformed plane", 3, total_steps)
 
     snap_band = max(_mean_edge_length(model_mesh) * 2.5, 1e-3)
     plane_kwargs = dict(
@@ -742,28 +849,13 @@ def slice_mesh_by_curve_plane(
     part_a = _snap_open_cut_to_plane(part_a, **plane_kwargs)
     part_b = _snap_open_cut_to_plane(part_b, **plane_kwargs)
 
-    if progress:
-        progress("Capping both opens with shared plane pattern + weld", 6, total_steps)
-
-    cap_kwargs = dict(
-        interior_xyz=interior_xyz,
-        interior_uv=interior_uv,
-        center=center,
-        i_axis=i_axis,
-        j_axis=j_axis,
-        half_i=half_i,
-        half_j=half_j,
-    )
-    part_a = _cap_part_with_shared_pattern(part_a, flip=True, **cap_kwargs)
-    part_b = _cap_part_with_shared_pattern(part_b, flip=False, **cap_kwargs)
-
     output_dir.mkdir(parents=True, exist_ok=True)
     path_a, path_b = curve_slice_output_paths(output_dir)
     part_a.save(str(path_a))
     part_b.save(str(path_b))
 
     if progress:
-        progress("Curve slice complete", 7, total_steps)
+        progress("Curve slice complete", 4, total_steps)
 
     return CurveSliceResult(
         part_a=part_a,
